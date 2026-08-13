@@ -29,6 +29,7 @@ class WebSocketClient(
         fun onSessionUpdate(session: SessionInfo)
         fun onSessionEnd(sessionId: String)
         fun onMessages(sessionId: String, isHistory: Boolean, isUpdate: Boolean, messages: List<ViewMessage>)
+        fun onInteraction(status: String, sessionId: String, message: String)
         fun onClosing(code: Int, reason: String)
         fun onFailure(t: Throwable)
     }
@@ -61,6 +62,11 @@ class WebSocketClient(
                         val isUpdate = obj.optBoolean("update")
                         listenerRef?.onMessages(sid, isHistory, isUpdate, Protocol.parseMessages(obj))
                     }
+                    "interaction" -> listenerRef?.onInteraction(
+                        obj.optString("status"),
+                        obj.optString("sessionId"),
+                        obj.optString("message"),
+                    )
                 }
             } catch (_: Exception) {
                 // 忽略无法解析的帧
@@ -90,6 +96,13 @@ class WebSocketClient(
 
     fun getHistory(sessionId: String) =
         ws?.send(JSONObject().put("type", "get-history").put("sessionId", sessionId).toString())
+
+    fun sendPrompt(prompt: String, sessionId: String?) =
+        ws?.send(JSONObject()
+            .put("type", "send-prompt")
+            .put("prompt", prompt)
+            .put("sessionId", sessionId ?: "")
+            .toString())
 
     fun close() {
         listenerRef = null

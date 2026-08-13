@@ -31,4 +31,17 @@
     <string name="unnamed_session">未命名会话</string>
     <string name="input_url_required">请输入 WebSocket 地址</string>
     <string name="connect_failed">连接失败: %1$s</string>
+
+    <!-- 扫码自动配置 -->
+    <string name="scan_connect">扫码连接</string>
+    <string name="scan_configured">已自动配置，正在连接…</string>
+    <string name="scan_unrecognized">无法识别的二维码</string>
+
+    <!-- 远程交互 -->
+    <string name="hint_prompt">向 Claude 发送指令…</string>
+    <string name="send">发送</string>
+    <string name="prompt_sent">已发送</string>
+    <string name="not_connected">尚未连接</string>
+    <string name="interact_done">执行完成</string>
+    <string name="interact_error">交互失败: %1$s</string>
 </resources>

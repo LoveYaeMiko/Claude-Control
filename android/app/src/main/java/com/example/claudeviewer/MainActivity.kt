@@ -1,6 +1,8 @@
 package com.example.claudeviewer
 
+import android.content.Intent
 import android.content.res.ColorStateList
+import android.net.Uri
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
@@ -16,6 +18,8 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.textfield.TextInputEditText
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 
 /**
  * 远程会话监视器：连接电脑端 relay_server，浏览会话并实时查看消息。
@@ -32,12 +36,21 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
     private lateinit var configToggle: TextView
     private lateinit var emptyView: TextView
     private lateinit var recycler: RecyclerView
+    private lateinit var scanBtn: MaterialButton
+    private lateinit var inputBar: LinearLayout
+    private lateinit var promptInput: TextInputEditText
+    private lateinit var sendBtn: MaterialButton
 
     private val adapter = MessageAdapter()
     private var ws: WebSocketClient? = null
     private val sessions = mutableListOf<SessionInfo>()
     private var selectedSessionId: String? = null
     private var historyLoadedFor: String? = null
+    private var pendingSessionId: String? = null
+
+    private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
+        result.contents?.let { applyConfigUri(it) }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -53,6 +66,10 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         configToggle = findViewById(R.id.config_toggle)
         emptyView = findViewById(R.id.empty_view)
         recycler = findViewById(R.id.message_list)
+        scanBtn = findViewById(R.id.scan_btn)
+        inputBar = findViewById(R.id.input_bar)
+        promptInput = findViewById(R.id.prompt_input)
+        sendBtn = findViewById(R.id.send_btn)
 
         recycler.layoutManager = LinearLayoutManager(this)
         recycler.adapter = adapter
@@ -62,6 +79,8 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         tokenInput.setText(prefs.getString("ws_token", ""))
 
         connectBtn.setOnClickListener { toggleConnection() }
+        scanBtn.setOnClickListener { launchScan() }
+        sendBtn.setOnClickListener { sendPrompt() }
         configToggle.setOnClickListener {
             val show = configPanel.visibility != View.VISIBLE
             configPanel.visibility = if (show) View.VISIBLE else View.GONE
@@ -73,6 +92,14 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
             }
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
+
+        handleIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIntent(intent)
     }
 
     override fun onDestroy() {
@@ -108,6 +135,7 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
             connectBtn.text = getString(R.string.disconnect)
             connectBtn.isEnabled = true
             setStatus(R.string.status_connected, R.color.status_connected)
+            inputBar.visibility = View.VISIBLE
             historyLoadedFor = null   // 重连后重新拉取当前会话历史，补齐断线间隙
             ws?.listSessions()
         }
@@ -118,6 +146,7 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
             this.sessions.clear()
             this.sessions.addAll(sessions)
             rebuildSpinner()
+            maybeSelectPending()
         }
     }
 
@@ -125,6 +154,7 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         runOnUiThread {
             if (sessions.none { it.id == session.id }) sessions.add(session)
             rebuildSpinner()
+            maybeSelectPending()
         }
     }
 
@@ -168,6 +198,7 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
                 connectBtn.isEnabled = true
                 setStatus(R.string.status_disconnected, R.color.status_idle)
                 configPanel.visibility = View.VISIBLE
+                inputBar.visibility = View.GONE
             }
         }
     }
@@ -179,7 +210,22 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
             connectBtn.isEnabled = true
             setStatus(R.string.status_failed, R.color.status_failed)
             configPanel.visibility = View.VISIBLE
+            inputBar.visibility = View.GONE
             toast(getString(R.string.connect_failed, t.message ?: ""))
+        }
+    }
+
+    override fun onInteraction(status: String, sessionId: String, message: String) {
+        runOnUiThread {
+            when (status) {
+                "started" -> toast(getString(R.string.prompt_sent))
+                "session" -> selectOrWait(sessionId)
+                "finished" -> {
+                    selectOrWait(sessionId)
+                    toast(getString(R.string.interact_done))
+                }
+                "error" -> toast(getString(R.string.interact_error, message))
+            }
         }
     }
 
@@ -233,6 +279,67 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
     }
 
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+
+    private fun launchScan() {
+        scanLauncher.launch(
+            ScanOptions()
+                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                .setPrompt(getString(R.string.scan_connect))
+                .setBeepEnabled(true)
+        )
+    }
+
+    private fun handleIntent(intent: Intent?) {
+        val data = intent?.data ?: return
+        applyConfigUri(data.toString())
+    }
+
+    private fun applyConfigUri(uriStr: String) {
+        val uri = Uri.parse(uriStr)
+        if (uri.scheme != "claudecontrol" || uri.host != "connect") {
+            toast(getString(R.string.scan_unrecognized))
+            return
+        }
+        val url = uri.getQueryParameter("url")
+        if (url.isNullOrBlank()) {
+            toast(getString(R.string.scan_unrecognized))
+            return
+        }
+        urlInput.setText(url)
+        tokenInput.setText(uri.getQueryParameter("token") ?: "")
+        toast(getString(R.string.scan_configured))
+        if (ws == null) toggleConnection()
+    }
+
+    private fun sendPrompt() {
+        val w = ws ?: run { toast(getString(R.string.not_connected)); return }
+        val text = promptInput.text.toString().trim()
+        if (text.isEmpty()) return
+        w.sendPrompt(text, selectedSessionId)
+        promptInput.setText("")
+        toast(getString(R.string.prompt_sent))
+    }
+
+    private fun selectOrWait(sessionId: String) {
+        if (sessionId.isBlank()) return
+        val pos = sessions.indexOfFirst { it.id == sessionId }
+        if (pos >= 0) {
+            pendingSessionId = null
+            if (selectedSessionId != sessionId) sessionSpinner.setSelection(pos)
+        } else {
+            pendingSessionId = sessionId
+            ws?.listSessions()
+        }
+    }
+
+    private fun maybeSelectPending() {
+        val pid = pendingSessionId ?: return
+        val pos = sessions.indexOfFirst { it.id == pid }
+        if (pos >= 0 && selectedSessionId != pid) {
+            pendingSessionId = null
+            sessionSpinner.setSelection(pos)
+        }
+    }
 
     /** 会话下拉：状态色点 + 标题 + 副标题（cwd/模型）。 */
     private inner class SessionAdapter(list: List<SessionInfo>) :

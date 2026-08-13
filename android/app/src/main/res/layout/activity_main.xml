@@ -61,6 +61,14 @@
                 android:textColor="@color/on_surface"
                 android:textSize="14sp" />
         </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/scan_btn"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/scan_connect" />
     </LinearLayout>
 
     <!-- 状态行：状态点 + 文本 + 设置开关 + 连接/断开按钮 -->
@@ -142,5 +150,44 @@
             android:textSize="15sp"
             android:visibility="gone" />
     </FrameLayout>
+
+    <!-- 远程交互输入栏（连接后可见） -->
+    <LinearLayout
+        android:id="@+id/input_bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:paddingTop="6dp"
+        android:paddingBottom="10dp"
+        android:visibility="gone">
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:hint="@string/hint_prompt"
+            app:boxBackgroundColor="@color/surface">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/prompt_input"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="textMultiLine"
+                android:maxLines="4"
+                android:textColor="@color/on_surface"
+                android:textSize="14sp" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/send_btn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="@string/send" />
+    </LinearLayout>
 
 </LinearLayout>

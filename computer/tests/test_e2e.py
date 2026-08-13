@@ -39,6 +39,25 @@ async def main() -> int:
         port = free_port()
         token = "test-token-123"
 
+        # 0) 配置 URI / WS 地址（纯函数单元测试，无需起服务）
+        class _TunnelsStub:
+            def __init__(self, url=""):
+                self.public_urls = [url] if url else []
+            def primary_url(self):
+                return self.public_urls[0] if self.public_urls else ""
+
+        cfg_uri = relay_server._make_config_uri(
+            relay_server.Config(port=9876, token=token, tunnel="lan"), _TunnelsStub(), 9876)
+        check("配置 URI 前缀", cfg_uri.startswith("claudecontrol://connect?"))
+        check("配置 URI 内嵌 url/token", "url=" in cfg_uri and f"token={token}" in cfg_uri)
+        ws_url = relay_server._make_ws_url(
+            relay_server.Config(port=9876, tunnel="lan"), _TunnelsStub(), 9876)
+        check("LAN WS 地址含 /ws 与端口", ws_url.startswith("ws://") and ws_url.endswith(":9876/ws"))
+        tunnel_uri = relay_server._make_config_uri(
+            relay_server.Config(port=9876, token=token, tunnel="cloudflared"),
+            _TunnelsStub("https://abc.trycloudflare.com"), 9876)
+        check("隧道配置 URI 用 wss", "url=wss%3A%2F%2Fabc.trycloudflare.com%2Fws" in tunnel_uri)
+
         env = dict(os.environ)
         env["CC_TRANSCRIPTS_DIR"] = str(root)
         env["CC_TOKEN"] = token
@@ -184,6 +203,20 @@ async def main() -> int:
                             got_update = True
                             break
                 check("WS update 帧补全 tool_result", got_update)
+
+                # 4c) send-prompt：CC_ALLOW_INTERACT 未开启 → interaction error（禁用态）
+                await ws.send(json.dumps({"type": "send-prompt", "prompt": "你好"}))
+                got_disabled = False
+                timeout = time.time() + 4
+                while time.time() < timeout:
+                    try:
+                        msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+                    except Exception:
+                        break
+                    if msg.get("type") == "interaction" and msg.get("status") == "error":
+                        got_disabled = "未开启" in msg.get("message", "")
+                        break
+                check("WS send-prompt 未开启返回 error", got_disabled)
 
             # 5) 追加一个 attention 会话（未完成的 Bash tool_use），状态应变为 attention
             sid2 = mock_transcript.make_mock_project(root)

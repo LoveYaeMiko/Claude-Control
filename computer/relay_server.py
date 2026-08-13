@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -73,6 +73,9 @@ class Config:
     tunnel: str = "lan"          # lan | ngrok | cloudflared | none
     ngrok_auth_token: str = ""
     debug: bool = False
+    allow_interact: bool = False                 # 手机端远程交互开关（CC_ALLOW_INTERACT=1）
+    interact_permission_mode: str = "bypassPermissions"  # 交互权限模式（CC_INTERACT_PERMISSION_MODE）
+    interact_model: str = ""                     # 交互所用模型（CC_INTERACT_MODEL，空=默认）
 
     @classmethod
     def from_env(cls, args: argparse.Namespace) -> "Config":
@@ -86,6 +89,9 @@ class Config:
             tunnel=_b("CC_TUNNEL", args.tunnel or "lan").lower(),
             ngrok_auth_token=_b("CC_NGROK_AUTH_TOKEN", ""),
             debug=_b("CC_DEBUG", "").lower() in ("1", "true", "yes"),
+            allow_interact=_b("CC_ALLOW_INTERACT", "").lower() in ("1", "true", "yes"),
+            interact_permission_mode=_b("CC_INTERACT_PERMISSION_MODE", "bypassPermissions"),
+            interact_model=_b("CC_INTERACT_MODEL", ""),
         )
         return cfg
 
@@ -602,6 +608,7 @@ class WSServer:
         self.cfg = cfg
         self.monitor = monitor
         self.hub = hub
+        self.interact = InteractRunner(cfg)
 
     async def handle(self, ws) -> None:
         token = self._extract_token(ws)
@@ -650,6 +657,8 @@ class WSServer:
                         }, ensure_ascii=False))
                 elif mtype == "ping":
                     await ws.send(json.dumps({"type": "pong"}))
+                elif mtype == "send-prompt":
+                    await self._handle_send_prompt(ws, msg)
         finally:
             self.hub.remove(ws)
             log.info("客户端断开: %s（在线 %d）", remote, len(self.hub.clients))
@@ -664,6 +673,136 @@ class WSServer:
                 if part.startswith("token="):
                     return unquote(part[6:])
         return ""
+
+    async def _handle_send_prompt(self, ws, msg: dict) -> None:
+        """手机端远程交互入口：校验开关后异步起 claude -p。"""
+        if not self.cfg.allow_interact:
+            await ws.send(json.dumps({
+                "type": "interaction", "status": "error",
+                "message": "远程交互未开启（需 CC_ALLOW_INTERACT=1）",
+            }, ensure_ascii=False))
+            return
+        prompt = str(msg.get("prompt", "") or "").strip()
+        if not prompt:
+            return
+        # 会话 id 仅保留 UUID 安全字符，防止 shell 注入
+        session_id = "".join(ch for ch in str(msg.get("sessionId", "") or "")
+                             if ch.isalnum() or ch in "-_.")
+        asyncio.create_task(self.interact.run(ws, prompt, session_id or None))
+
+
+# ---------------------------------------------------------------------------
+# 远程交互：调用 claude -p 无头子进程
+# ---------------------------------------------------------------------------
+
+class InteractRunner:
+    """调用 `claude -p` 无头子进程执行手机端发来的 prompt。
+
+    响应内容不在此转发 —— 子进程会把会话写入 ~/.claude/projects，
+    由 TranscriptMonitor 自动发现并广播给所有查看端（复用现有链路）。
+    这里只负责：起进程、上报 session_id 与完成/失败状态、并发与频率限制。
+    """
+
+    MAX_CONCURRENT = 4      # 全局并发交互上限
+    RATE_INTERVAL = 2.0     # 每连接两次交互最小间隔（秒）
+
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self._sem = asyncio.Semaphore(self.MAX_CONCURRENT)
+        self._last: Dict[int, float] = {}
+
+    def _command(self, session_id: Optional[str]) -> str:
+        """构造固定命令（不含任何用户输入；prompt 走 stdin 传入）。"""
+        parts = ["claude", "-p", "--verbose", "--output-format", "stream-json",
+                 "--permission-mode", self.cfg.interact_permission_mode]
+        if self.cfg.interact_permission_mode == "bypassPermissions":
+            parts.append("--dangerously-skip-permissions")
+        if session_id:
+            parts += ["--resume", session_id]
+        if self.cfg.interact_model:
+            parts += ["--model", self.cfg.interact_model]
+        return " ".join(parts)
+
+    async def run(self, ws, prompt: str, session_id: Optional[str]) -> None:
+        async def send(obj: dict) -> None:
+            try:
+                await ws.send(json.dumps(obj, ensure_ascii=False))
+            except Exception:
+                pass
+
+        key = id(ws)
+        now = time.monotonic()
+        if now - self._last.get(key, 0.0) < self.RATE_INTERVAL:
+            await send({"type": "interaction", "status": "error",
+                        "message": "发送过快，请稍候"})
+            return
+        self._last[key] = now
+
+        async with self._sem:
+            await send({"type": "interaction", "status": "started",
+                        "sessionId": session_id or ""})
+            try:
+                proc = await asyncio.create_subprocess_shell(
+                    self._command(session_id),
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except Exception as exc:
+                await send({"type": "interaction", "status": "error",
+                            "message": f"无法启动 claude：{exc}"})
+                return
+
+            try:
+                proc.stdin.write((prompt + "\n").encode("utf-8"))
+                await proc.stdin.drain()
+            except Exception:
+                pass
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+
+            found_session = session_id or ""
+            stderr_tail: List[str] = []
+
+            async def drain_stderr() -> None:
+                async for raw in proc.stderr:
+                    s = raw.decode("utf-8", "replace").strip()
+                    if s:
+                        stderr_tail.append(s)
+                        if len(stderr_tail) > 8:
+                            stderr_tail.pop(0)
+
+            stderr_task = asyncio.create_task(drain_stderr())
+            try:
+                async for raw in proc.stdout:
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line or found_session:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        sid = obj.get("session_id") if isinstance(obj, dict) else None
+                        if sid:
+                            found_session = str(sid)
+                            await send({"type": "interaction", "status": "session",
+                                        "sessionId": found_session})
+                    except Exception:
+                        pass
+            finally:
+                await stderr_task
+
+            code = await proc.wait()
+
+            if code == 0:
+                await send({"type": "interaction", "status": "finished",
+                            "sessionId": found_session, "exitCode": 0})
+            else:
+                tail = "\n".join(stderr_tail)[:500]
+                await send({"type": "interaction", "status": "error",
+                            "sessionId": found_session, "exitCode": code,
+                            "message": tail or f"claude 退出码 {code}"})
+            log.info("交互结束: exit=%s session=%s", code, found_session)
 
 
 # ---------------------------------------------------------------------------
@@ -708,10 +847,12 @@ def make_http_response(status, body: bytes, content_type: str, extra=None):
 
 
 class HttpRoutes:
-    def __init__(self, cfg: Config, monitor: TranscriptMonitor, url_getter: callable):
+    def __init__(self, cfg: Config, monitor: TranscriptMonitor, url_getter: callable,
+                 config_uri_getter: callable = None):
         self.cfg = cfg
         self.monitor = monitor
         self.url_getter = url_getter   # 同步 () -> str 连接地址（含 token）
+        self.config_uri_getter = config_uri_getter or url_getter
 
     def route(self, path: str, query: str = "") -> Optional[Any]:
         if path == "/healthz":
@@ -756,22 +897,32 @@ class HttpRoutes:
 
     def _qrcode(self) -> Any:
         try:
-            url = self.url_getter()
+            config_uri = self.config_uri_getter()
         except Exception:
-            url = "http://localhost:9876"
-        title = f"Claude-Control — 扫码连接（token 已内嵌）"
-        svg = self._qr_svg(url) if _qr_available() else None
+            config_uri = ""
+        try:
+            web_url = self.url_getter()
+        except Exception:
+            web_url = "http://localhost:9876"
+        title = "Claude-Control — 扫码连接（token 已内嵌）"
+        qr_target = config_uri or web_url
+        svg = self._qr_svg(qr_target) if _qr_available() else None
         if svg:
             html = (f"<!doctype html><meta charset=utf-8><title>{title}</title>"
                     f"<body style='background:#0e1117;color:#dbe4f0;font-family:sans-serif;"
                     f"display:flex;flex-direction:column;align-items:center;gap:16px;padding-top:32px'>"
                     f"<h2 style='font-size:18px'>{title}</h2>{svg}"
-                    f"<p style='font-size:13px;color:#8b98ab;word-break:break-all;max-width:90vw'>{url}</p></body>")
+                    f"<p style='font-size:13px;color:#8b98ab;max-width:90vw'>"
+                    f"安卓 App 扫码自动配置：<br>"
+                    f"<span style='word-break:break-all'>{config_uri}</span></p>"
+                    f"<p style='font-size:13px;color:#8b98ab;word-break:break-all;max-width:90vw'>"
+                    f"网页查看器：{web_url}</p></body>")
         else:
             html = (f"<!doctype html><meta charset=utf-8><title>{title}</title>"
                     f"<body style='background:#0e1117;color:#dbe4f0;font-family:monospace;padding:32px'>"
-                    f"<h2>{title}</h2><p>未安装 segno，无法生成二维码，请直接在手机浏览器打开：</p>"
-                    f"<p style='word-break:break-all'>{url}</p></body>")
+                    f"<h2>{title}</h2><p>未安装 segno，无法生成二维码，请直接打开：</p>"
+                    f"<p style='word-break:break-all'>安卓配置：{config_uri}</p>"
+                    f"<p style='word-break:break-all'>网页查看器：{web_url}</p></body>")
         return make_http_response(200, html.encode("utf-8"), "text/html; charset=utf-8",
                                   {"Cache-Control": "no-store"})
 
@@ -925,6 +1076,22 @@ def _make_public_url(cfg: Config, tunnels: Tunnels, port: int) -> str:
     return f"{base}{sep}token={cfg.token}"
 
 
+def _make_ws_url(cfg: Config, tunnels: Tunnels, port: int) -> str:
+    """构造 WebSocket 连接地址（含 /ws 路径）：优先公网隧道，其次局域网 IP。"""
+    base = tunnels.primary_url()
+    if base:
+        host = base.split("//", 1)[-1].split("/", 1)[0]
+        return f"wss://{host}/ws"
+    return f"ws://{lan_ips()[0]}:{port}/ws"
+
+
+def _make_config_uri(cfg: Config, tunnels: Tunnels, port: int) -> str:
+    """构造安卓 App 配置深链：claudecontrol://connect?url=...&token=..."""
+    ws_url = _make_ws_url(cfg, tunnels, port)
+    return (f"claudecontrol://connect?url={quote(ws_url, safe='')}"
+            f"&token={quote(cfg.token, safe='')}")
+
+
 async def main() -> None:
     # Windows 下重定向输出时默认 ANSI 代码页，中文打印可能 UnicodeEncodeError
     for stream in (sys.stdout, sys.stderr):
@@ -953,7 +1120,9 @@ async def main() -> None:
     monitor = TranscriptMonitor(cfg)
     tunnels = Tunnels(cfg, cfg.port)
     ws_server = WSServer(cfg, monitor, hub)
-    http_routes = HttpRoutes(cfg, monitor, lambda: _make_public_url(cfg, tunnels, cfg.port))
+    http_routes = HttpRoutes(cfg, monitor,
+                             lambda: _make_public_url(cfg, tunnels, cfg.port),
+                             lambda: _make_config_uri(cfg, tunnels, cfg.port))
 
     async def event_cb(evt: dict) -> None:
         await hub.broadcast(evt)
@@ -995,6 +1164,7 @@ async def main() -> None:
         # 让隧道任务先跑一会儿，尽量拿到公网地址
         await asyncio.sleep(1.5)
         _public_url = _make_public_url(cfg, tunnels, cfg.port)
+        _config_uri = _make_config_uri(cfg, tunnels, cfg.port)
 
         print("\n" + "─" * 60)
         print("  Claude-Control 远程会话查看器")
@@ -1003,9 +1173,13 @@ async def main() -> None:
             print(f"  连接地址: {u}")
         print(f"  WebSocket: ws://localhost:{cfg.port}/ws?token={cfg.token}")
         print(f"  查看端页面: http://localhost:{cfg.port}/")
+        if cfg.allow_interact:
+            print(f"  远程交互: 已开启（permission={cfg.interact_permission_mode}）")
         print("─" * 60)
-        if cfg.tunnel != "none" and _public_url:
-            _print_terminal_qr(_public_url)
+        if _qr_available():
+            print("  安卓 App 扫码自动配置（url + token）：")
+            _print_terminal_qr(_config_uri)
+            print(f"  配置链接: {_config_uri}")
         print("  手机与电脑同一局域网时，直接用 LAN 地址即可（无需穿透）。")
         print("  按 Ctrl+C 停止。")
 

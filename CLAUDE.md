@@ -1,14 +1,16 @@
 # Claude-Control
 
-> 基于 `blueprint.md` 蓝图实现的 **Claude Code 远程会话查看器**（内网穿透版）。
+> 基于 `blueprint.md` 蓝图实现的 **Claude Code 远程会话查看器 / 交互器**（内网穿透版）。
 
 ## 项目定位
 
-通过安卓手机 App / 手机浏览器实时查看电脑上运行的 Claude Code 会话，无需公网服务器，仅靠内网穿透。
+通过安卓手机 App / 手机浏览器实时**查看**并**远程交互**电脑上运行的 Claude Code 会话，无需公网服务器，仅靠内网穿透。
 
 - **采集**：直接读取 Claude Code 自身写入的会话转录 `~/.claude/projects/<cwd-slug>/<session-id>.jsonl`（无需 `script`/`tail`，Windows 原生，结构化数据更丰富）。
 - **传输**：Python 内建 WebSocket 中继服务（默认端口 9876），手机端通过内网穿透后的公网地址直连。
 - **安全**：WebSocket 连接携带预共享 token（`?token=...`），防止匿名访问。
+- **远程交互**：手机端发 `send-prompt`，中继异步起 `claude -p` 无头子进程在电脑上执行（需 `CC_ALLOW_INTERACT=1` 显式开启），结果经转录监控链路实时回显。
+- **扫码自动配置**：启动时打印「配置二维码」（`claudecontrol://connect?url=...&token=...`），手机 App 扫码自动填好 URL + token 并连接。
 
 ## 架构
 
@@ -54,12 +56,16 @@
 | 转录目录 | `CC_TRANSCRIPTS_DIR` | `~/.claude/projects` | 扫描根目录 |
 | 隧道 | `CC_TUNNEL` | `lan` | `lan`/`ngrok`/`cloudflared`/`none` |
 | ngrok 令牌 | `CC_NGROK_AUTH_TOKEN` | 空 | 仅 `CC_TUNNEL=ngrok` 需要 |
+| 远程交互 | `CC_ALLOW_INTERACT` | `0` | `1` 开启手机端发送 prompt（远程执行，慎开） |
+| 交互权限 | `CC_INTERACT_PERMISSION_MODE` | `bypassPermissions` | `bypassPermissions`/`acceptEdits`/`plan` |
+| 交互模型 | `CC_INTERACT_MODEL` | 空 | 留空用默认模型 |
 | 调试 | `CC_DEBUG` | `0` | 打印详细日志 |
 
 WS 消息协议：
 
-- 服务端推：`hello` / `sessions` / `session-start` / `session-update` / `session-end` / `messages` / `ping`。
-- 客户端发：`get-history` / `list-sessions` / `ping`。
+- 服务端推：`hello` / `sessions` / `session-start` / `session-update` / `session-end` / `messages` / `interaction` / `ping`。
+- 客户端发：`get-history` / `list-sessions` / `send-prompt` / `ping`。
+- `send-prompt`（需 `CC_ALLOW_INTERACT=1`）异步起 `claude -p` 执行；服务端回 `interaction` 状态帧（`started` → `session` → `finished`/`error`），内容回显复用 `messages` 链路。
 - `messages` 携带 `isHistory`（历史回放）与 `update`（就地补全：tool_result 合并到已广播的 tool_use）标志；网页端/安卓端按 `idx` 去重 / 替换。
 - `get-history` 有每连接 0.3s 限流；无 token 的 `/qrcode` 访问被拒（返回 401），避免内嵌 token 泄露。
 - 会话状态：`active` / `attention`（存在待批准工具调用）/ `idle` / `ended`，依据 mtime + 待定工具判定；每个会话最多保留 `HISTORY_LIMIT` 条记录，会话数超 `MAX_SESSIONS` 后驱逐已结束会话。
@@ -115,4 +121,4 @@ Claude-Control/
 - **平台**：本机为 Windows 11。JSONL 转录由 Claude Code 追加写入，中继必须只读；`PYTHONUTF8=1` 可避免 GBK 编码错误。
 - **敏感配置**：`CC_TOKEN` 与 `CC_NGROK_AUTH_TOKEN` 不应硬编码提交；以 `.env`（已在 `.gitignore`）或环境变量注入。
 - **依赖版本**：`websockets>=16`（v17 的 `Response` 为 4 字段 dataclass）、`segno`（终端 ANSI + SVG 二维码）。
-- **测试**：`python tests/test_e2e.py` 起临时服务跑通 20 项断言（HTTP/WS 鉴权/history/合并/广播/状态）。
+- **测试**：`python tests/test_e2e.py` 起临时服务跑通 25 项断言（HTTP/WS 鉴权/history/合并/广播/状态/交互/配置 URI）。
