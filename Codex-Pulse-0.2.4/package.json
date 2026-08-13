@@ -1,0 +1,23 @@
+{
+  "name": "codex-pulse",
+  "productName": "Codex Pulse",
+  "version": "0.2.4",
+  "description": "A lightweight Tauri menu bar monitor for local and remote Codex CLI sessions.",
+  "scripts": {
+    "start": "tauri dev",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "package": "tauri build --bundles app",
+    "make": "TAURI_BUNDLER_DMG_IGNORE_CI=true CI=true tauri build --bundles app,dmg",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "check": "cargo check --manifest-path src-tauri/Cargo.toml && node --check src/renderer/tauri-bridge.js && node --check src/renderer/app.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "author": "Codex Pulse contributors",
+  "license": "MIT",
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4"
+  }
+}

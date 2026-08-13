@@ -1,0 +1,60 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Codex Pulse",
+  "version": "0.2.4",
+  "identifier": "dev.local.codex-pulse",
+  "build": {
+    "frontendDist": "../src/renderer"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Codex Pulse",
+        "width": 370,
+        "height": 323,
+        "minWidth": 370,
+        "maxWidth": 370,
+        "minHeight": 190,
+        "maxHeight": 1600,
+        "resizable": false,
+        "fullscreen": false,
+        "decorations": false,
+        "transparent": true,
+        "visible": false,
+        "alwaysOnTop": false,
+        "skipTaskbar": false,
+        "shadow": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "category": "DeveloperTool",
+    "shortDescription": "Monitor local and remote Codex CLI sessions",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "14.0",
+      "signingIdentity": "-",
+      "hardenedRuntime": false,
+      "dmg": {
+        "background": "./dmg/background.png",
+        "appPosition": { "x": 170, "y": 220 },
+        "applicationFolderPosition": { "x": 490, "y": 220 },
+        "windowSize": { "width": 660, "height": 400 }
+      }
+    }
+  }
+}

@@ -1,0 +1,5 @@
+# ngrok 穿透模式可选依赖（默认 LAN / cloudflared 无需账号）
+# 仅当 CC_TUNNEL=ngrok 时需要:
+#   pip install -r requirements-ngrok.txt
+# 并需提供 ngrok 账号 authtoken（见 ACCOUNTS.md）
+pyngrok>=7.0

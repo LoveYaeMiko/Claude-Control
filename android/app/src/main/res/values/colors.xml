@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Material3 深色调色板 -->
+    <color name="primary">#4C8DFF</color>
+    <color name="on_primary">#FFFFFF</color>
+    <color name="primary_container">#1E3A5F</color>
+    <color name="on_primary_container">#D6E4FF</color>
+    <color name="background">#1A1D24</color>
+    <color name="surface">#222733</color>
+    <color name="surface_variant">#2A303C</color>
+    <color name="on_surface">#E8ECF4</color>
+    <color name="on_surface_variant">#A0A8B8</color>
+    <color name="outline">#5A6472</color>
+    <color name="error">#FF6B6B</color>
+
+    <!-- 连接状态色 -->
+    <color name="status_idle">#A0A8B8</color>
+    <color name="status_connecting">#F5A623</color>
+    <color name="status_connected">#2ECC71</color>
+    <color name="status_failed">#FF6B6B</color>
+    <color name="status_active">#2ECC71</color>
+    <color name="status_attention">#F5A623</color>
+    <color name="status_ended">#5A6472</color>
+
+    <!-- 角色色 -->
+    <color name="role_user">#7FB4FF</color>
+    <color name="role_assistant">#64D6A0</color>
+    <color name="role_system">#A0A8B8</color>
+
+    <!-- 消息语义色 -->
+    <color name="msg_user_bg">#142B7FFF</color>
+    <color name="msg_header">#A0A8B8</color>
+    <color name="msg_text_primary">#E8ECF4</color>
+    <color name="msg_text_dim">#A0A8B8</color>
+    <color name="msg_text_muted">#9AA3B2</color>
+    <color name="msg_text_error">#FF6B6B</color>
+    <color name="msg_label">#C9D2E0</color>
+    <color name="msg_highlight">#22FFFFFF</color>
+
+    <!-- 图标 / 启动器 -->
+    <color name="ic_launcher_background">#1A1D24</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+</resources>

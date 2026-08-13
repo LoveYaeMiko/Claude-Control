@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# Node / Tauri
+node_modules/
+dist/
+out/
+*.log
+npm-debug.log*
+
+# Secrets
+.env
+.env.local
+
+# 二进制依赖（cloudflared，约 54MB，不入库，见 ACCOUNTS.md 下载说明）
+computer/bin/cloudflared.exe
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.iml
+
+# Android 签名密钥（勿提交）
+android/keystore/
+android/keystore.properties
+
+# Android 构建产物（APK 建议走 GitHub Release 分发）
+*.apk
+
+# 研究笔记（本地草稿，不提交）
+computer/_research_*.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 会话日志（含敏感终端输出）
+*.session.log
+claude_session.log

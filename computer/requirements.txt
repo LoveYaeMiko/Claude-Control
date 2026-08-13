@@ -1,0 +1,6 @@
+# Claude-Control 电脑端依赖
+# 安装: pip install -r requirements.txt
+# websockets>=16: process_request 签名与 Response(status, reason, headers, body) 于 16.x 起生效
+websockets>=16
+python-dotenv>=1.0
+segno>=1.6

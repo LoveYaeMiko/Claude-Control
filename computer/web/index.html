@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#0e1117">
+  <title>Claude-Control</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📡</text></svg>">
+</head>
+<body>
+  <header id="topbar">
+    <div class="brand">
+      <span class="brand-mark">◉</span>
+      <span class="brand-name">Claude-Control</span>
+    </div>
+    <div class="topbar-right">
+      <span id="wsDot" class="dot dot-off" title="连接状态"></span>
+      <span id="wsStatus" class="ws-status">未连接</span>
+      <button id="reconnectBtn" class="btn-ghost" title="重新连接">⟳</button>
+    </div>
+  </header>
+
+  <section id="sessionBar" class="session-bar">
+    <label class="sr-only" for="sessionSelect">选择会话</label>
+    <select id="sessionSelect" class="session-select" disabled>
+      <option value="">— 无可用会话 —</option>
+    </select>
+    <a id="qrLink" class="btn-ghost qr-link" title="扫码连接" href="/qrcode" target="_blank" rel="noopener">二维码</a>
+  </section>
+
+  <main id="conversation" class="conversation" aria-live="polite">
+    <div id="emptyState" class="empty-state">
+      <div class="empty-icon">📡</div>
+      <p>等待连接服务器…</p>
+      <p class="empty-hint">连接后即可实时查看 Claude Code 会话</p>
+    </div>
+  </main>
+
+  <footer id="footer" class="footer">
+    <span id="footerInfo">未连接</span>
+  </footer>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

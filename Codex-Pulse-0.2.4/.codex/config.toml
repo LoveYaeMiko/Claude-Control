@@ -1,0 +1,5 @@
+# Keep project sessions lean: Codex Pulse builds and tests with the local
+# Electron, Node.js, SQLite CLI, shell, and Python toolchain only.
+
+[mcp_servers.node_repl]
+enabled = false

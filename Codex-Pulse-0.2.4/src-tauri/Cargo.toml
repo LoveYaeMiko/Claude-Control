@@ -1,0 +1,32 @@
+[package]
+name = "codex-pulse"
+version = "0.2.4"
+description = "A lightweight monitor for local and remote Codex CLI sessions"
+authors = ["Codex Pulse contributors"]
+license = "MIT"
+repository = "https://github.com/xiaoqiuuuu/Codex-Pulse"
+edition = "2024"
+rust-version = "1.85"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "codex_pulse_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+arboard = "3.6"
+base64 = "0.22"
+chrono = "0.4"
+dirs = "6"
+glob = "0.3"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tauri = { version = "2.11.3", features = ["image-png", "macos-private-api", "tray-icon"] }
+tauri-plugin-single-instance = "2"
+tempfile = "3"
+wait-timeout = "0.2"

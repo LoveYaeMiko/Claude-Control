@@ -1,0 +1,8 @@
+.build/
+node_modules/
+out/
+dist/
+.DS_Store
+*.xcuserstate
+error.log
+npm-debug.log*

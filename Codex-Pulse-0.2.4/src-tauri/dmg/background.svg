@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="400" viewBox="0 0 660 400">
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#111820"/>
+      <stop offset="0.58" stop-color="#17232d"/>
+      <stop offset="1" stop-color="#10161d"/>
+    </linearGradient>
+    <radialGradient id="cyan-glow" cx="0" cy="0" r="1" gradientTransform="translate(122 270) rotate(-8) scale(270 225)">
+      <stop stop-color="#25bfd6" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#25bfd6" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="gold-glow" cx="0" cy="0" r="1" gradientTransform="translate(565 88) rotate(146) scale(245 185)">
+      <stop stop-color="#ffbd38" stop-opacity="0.13"/>
+      <stop offset="1" stop-color="#ffbd38" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="arrow" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#27bfd6"/>
+      <stop offset="1" stop-color="#ffbd38"/>
+    </linearGradient>
+    <filter id="arrow-shadow" x="-30%" y="-100%" width="160%" height="300%">
+      <feGaussianBlur stdDeviation="5"/>
+    </filter>
+  </defs>
+
+  <rect width="660" height="400" rx="18" fill="url(#background)"/>
+  <rect width="660" height="400" rx="18" fill="url(#cyan-glow)"/>
+  <rect width="660" height="400" rx="18" fill="url(#gold-glow)"/>
+  <path d="M0 104H660" stroke="#ffffff" stroke-opacity="0.07"/>
+
+  <g transform="translate(32 28)">
+    <circle cx="18" cy="18" r="14" fill="none" stroke="#25bfd6" stroke-width="6" stroke-dasharray="58 30" transform="rotate(34 18 18)"/>
+    <circle cx="18" cy="18" r="14" fill="none" stroke="#ffbd38" stroke-width="6" stroke-dasharray="58 30" transform="rotate(214 18 18)"/>
+    <circle cx="18" cy="18" r="3.5" fill="#eef6f8"/>
+  </g>
+  <text x="78" y="48" fill="#f2f6f8" font-family="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif" font-size="20" font-weight="700">Codex Pulse</text>
+  <text x="78" y="70" fill="#8f9da8" font-family="-apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif" font-size="12">轻量的 Codex 会话监控器</text>
+
+  <text x="330" y="135" text-anchor="middle" fill="#dce5e9" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif" font-size="15" font-weight="600">拖动 Codex Pulse 到 Applications</text>
+  <text x="330" y="157" text-anchor="middle" fill="#758590" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif" font-size="11">即可完成安装</text>
+
+  <path d="M278 218H380" stroke="#16232b" stroke-opacity="0.9" stroke-width="12" stroke-linecap="round" filter="url(#arrow-shadow)"/>
+  <path d="M278 218H374" stroke="url(#arrow)" stroke-width="4" stroke-linecap="round"/>
+  <path d="M363 207L376 218L363 229" fill="none" stroke="#ffbd38" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <g opacity="0.48">
+    <circle cx="292" cy="218" r="2" fill="#a9e9f1"/>
+    <circle cx="310" cy="218" r="2" fill="#bfe4d9"/>
+    <circle cx="328" cy="218" r="2" fill="#d5dfbe"/>
+    <circle cx="346" cy="218" r="2" fill="#ead9a2"/>
+  </g>
+
+  <text x="330" y="365" text-anchor="middle" fill="#64737e" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif" font-size="10">适用于 Apple Silicon · macOS 14 或更高版本</text>
+</svg>
