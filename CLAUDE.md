@@ -1,6 +1,6 @@
 # Claude-Control
 
-> 基于 `blueprint.md` 蓝图、参照 `Codex-Pulse-0.2.4/` 实现的 **Claude Code 远程会话查看器**（内网穿透版）。
+> 基于 `blueprint.md` 蓝图实现的 **Claude Code 远程会话查看器**（内网穿透版）。
 
 ## 项目定位
 
@@ -9,7 +9,6 @@
 - **采集**：直接读取 Claude Code 自身写入的会话转录 `~/.claude/projects/<cwd-slug>/<session-id>.jsonl`（无需 `script`/`tail`，Windows 原生，结构化数据更丰富）。
 - **传输**：Python 内建 WebSocket 中继服务（默认端口 9876），手机端通过内网穿透后的公网地址直连。
 - **安全**：WebSocket 连接携带预共享 token（`?token=...`），防止匿名访问。
-- **参考**：`Codex-Pulse-0.2.4/` 提供了会话监视/状态判定的参考实现（本机只读扫描 + 远程适配），本项目把同样的思路应用到 Claude Code 会话转录。
 
 ## 架构
 
@@ -70,7 +69,6 @@ WS 消息协议：
 ```
 Claude-Control/
 ├── blueprint.md            # 项目蓝图
-├── Codex-Pulse-0.2.4/      # 参考实现（只读，勿改动）
 ├── CLAUDE.md               # 本文件
 ├── .claude/
 │   └── settings.json       # 项目级插件启用配置
@@ -118,4 +116,3 @@ Claude-Control/
 - **敏感配置**：`CC_TOKEN` 与 `CC_NGROK_AUTH_TOKEN` 不应硬编码提交；以 `.env`（已在 `.gitignore`）或环境变量注入。
 - **依赖版本**：`websockets>=16`（v17 的 `Response` 为 4 字段 dataclass）、`segno`（终端 ANSI + SVG 二维码）。
 - **测试**：`python tests/test_e2e.py` 起临时服务跑通 20 项断言（HTTP/WS 鉴权/history/合并/广播/状态）。
-- **参考目录**：`Codex-Pulse-0.2.4/` 仅作参考，勿直接改动；如需参照其实现，先经 `code-explorer` 分析后再落地。

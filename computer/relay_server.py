@@ -8,7 +8,7 @@ Claude-Control 电脑端中继服务
 通过 WebSocket 实时广播给手机/浏览器查看端；同端口提供移动端查看页、
 连接二维码与健康检查；可选内网穿透（lan / ngrok / cloudflared）。
 
-架构（参考 Codex-Pulse 只读扫描思路，落地到 Claude Code）:
+架构:
     ~/.claude/projects/<cwd-slug>/<session-id>.jsonl
         │ 轮询扫描（默认 1s）+ 增量读取
         ▼
@@ -163,7 +163,7 @@ def lan_ips() -> List[str]:
 IGNORED_TYPES = {"file-history-delta", "file-history-snapshot", "file-history-update",
                  "file-history-delete", "queue-operation"}
 
-# 需要审批的工具名（用于“等待审批”状态判定；参考 codex-pulse 的 attention 启发式）
+# 需要审批的工具名（用于“等待审批”状态判定）
 PERMISSION_TOOLS = {
     "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "Read",
     "WebFetch", "WebSearch", "Glob", "Grep", "LS", "TodoWrite",

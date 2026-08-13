@@ -82,7 +82,6 @@ Windows 也可直接双击 `start.bat`（自动建 venv、装依赖、启动）�
 | [ACCOUNTS.md](ACCOUNTS.md) | 需要的外部账号/接口清单 |
 | [REPORT-Phase1.md](REPORT-Phase1.md) | 阶段一报告：初步构建、审查结论与修复记录 |
 | [REPORT-Phase2.md](REPORT-Phase2.md) | 阶段二报告：安卓 UI 优化、Markdown 渲染、公网联调与 APK 发布 |
-| [Codex-Pulse-0.2.4/](Codex-Pulse-0.2.4/) | 参考实现：Codex 会话监视器 |
 | [blueprint.md](blueprint.md) | 项目蓝图（完整实现指南） |
 | [.claude/](.claude/) | Claude Code 工程配置（插件启用） |
 
@@ -103,5 +102,4 @@ Windows 也可直接双击 `start.bat`（自动建 venv、装依赖、启动）�
 ## 参考
 
 - 完整实现蓝图见 [blueprint.md](blueprint.md)。
-- 会话监视/状态判定参考 [Codex-Pulse-0.2.4/](Codex-Pulse-0.2.4/)。
 - 工程技能插件：`feature-dev` 与 `mattpocock-skills`（详见 [CLAUDE.md](CLAUDE.md)）。

@@ -87,7 +87,7 @@ def write_transcript(path: Path, session_id: str, lines=None):
             assistant_text(session_id, "好的，我先分析现有代码结构。",
                            thinking="用户希望初始化项目，先从探索代码开始。"),
             assistant_tool_use(session_id, "Bash", {"command": "ls -la"}, tool_id="call_01"),
-            user_tool_result(session_id, "call_01", "blueprint.md\nCodex-Pulse-0.2.4/", is_error=False),
+            user_tool_result(session_id, "call_01", "blueprint.md\ncomputer/relay_server.py", is_error=False),
             assistant_text(session_id, "分析完成，开始配置……"),
             ai_title(session_id, "初始化项目配置"),
             last_prompt(session_id, "帮我初始化项目配置"),
