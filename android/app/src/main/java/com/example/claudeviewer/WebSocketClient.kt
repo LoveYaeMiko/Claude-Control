@@ -86,8 +86,11 @@ class WebSocketClient(
 
     fun connect(listener: Listener) {
         this.listenerRef = listener
-        val url = if (token.isBlank()) "$baseUrl/ws"
-        else "$baseUrl/ws?token=${URLEncoder.encode(token, "UTF-8")}"
+        // 兼容两种输入：手动填的基础地址（无 /ws）与扫码得到的完整 WS 地址（含 /ws），
+        // 统一剥掉末尾 /ws 后重拼，避免拼出 /ws/ws 导致连接失败。
+        val host = baseUrl.trimEnd('/').removeSuffix("/ws")
+        val url = if (token.isBlank()) "$host/ws"
+        else "$host/ws?token=${URLEncoder.encode(token, "UTF-8")}"
         val request = Request.Builder().url(url).build()
         ws = client.newWebSocket(request, wsListener)
     }
