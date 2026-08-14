@@ -17,6 +17,9 @@ npm-debug.log*
 .env
 .env.local
 
+# 启动时生成的连接二维码（内嵌 token 的运行时产物）
+连接二维码.png
+
 # 二进制依赖（cloudflared，约 54MB，不入库，见 ACCOUNTS.md 下载说明）
 computer/bin/cloudflared.exe
 

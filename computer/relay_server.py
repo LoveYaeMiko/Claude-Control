@@ -37,6 +37,7 @@ import socket
 import subprocess
 import sys
 import time
+import webbrowser
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,12 +49,16 @@ from urllib.parse import quote, unquote
 # ---------------------------------------------------------------------------
 
 APP_NAME = "Claude-Control"
-VERSION = "0.1.0"
+VERSION = "0.2.2"
 DEFAULT_PORT = 9876
 SCAN_INTERVAL = 1.0          # transcript 轮询间隔（秒）
 IDLE_TIMEOUT = 120           # 会话超过 N 秒无写入视为“结束”（供状态展示）
 HISTORY_LIMIT = 3000         # 历史消息下发上限 / 每个会话内存中保留的记录数（条）
+HISTORY_PAGE = 50            # get-history 单页下发的默认记录数（手机端分页加载，避免一次拉全量）
 MAX_SESSIONS = 400           # 同时监控的会话数上限（超出后驱逐已结束会话）
+THINKING_LIMIT = 4000        # 单个 thinking 块下发的最大字符数（截断推理过程，控制 get-history 体积）
+TEXT_LIMIT = 16000           # 单个 text 块下发的最大字符数（截断超长正文，控制 get-history 体积）
+PROJECT_ROOT = Path(__file__).resolve().parent.parent   # 项目根目录（Claude-Control/）
 
 log = logging.getLogger("claude-control")
 
@@ -76,6 +81,14 @@ class Config:
     allow_interact: bool = False                 # 手机端远程交互开关（CC_ALLOW_INTERACT=1）
     interact_permission_mode: str = "bypassPermissions"  # 交互权限模式（CC_INTERACT_PERMISSION_MODE）
     interact_model: str = ""                     # 交互所用模型（CC_INTERACT_MODEL，空=默认）
+    auto_open: bool = True                       # 启动时自动打开连接面板（CC_AUTO_OPEN=0 关闭）
+    qr_png_path: Path = PROJECT_ROOT / "连接二维码.png"  # 启动生成的二维码 PNG 位置（CC_QR_PNG_PATH）
+    email_to: str = "3555452607@qq.com"          # 邮件收件人（CC_EMAIL_TO）
+    email_user: str = "3555452607@qq.com"        # SMTP 发件账号（CC_EMAIL_USER，QQ 邮箱即收件人）
+    email_auth_code: str = ""                    # SMTP 授权码（CC_EMAIL_AUTH_CODE，QQ 邮箱需开通 SMTP 后获取）
+    email_smtp_host: str = "smtp.qq.com"         # SMTP 服务器（CC_EMAIL_SMTP_HOST）
+    email_smtp_port: int = 465                   # SMTP 端口（CC_EMAIL_SMTP_PORT，QQ 用 465/SSL）
+    email_from_name: str = "Claude-Control"      # 发件人显示名（CC_EMAIL_FROM_NAME）
 
     @classmethod
     def from_env(cls, args: argparse.Namespace) -> "Config":
@@ -92,6 +105,14 @@ class Config:
             allow_interact=_b("CC_ALLOW_INTERACT", "").lower() in ("1", "true", "yes"),
             interact_permission_mode=_b("CC_INTERACT_PERMISSION_MODE", "bypassPermissions"),
             interact_model=_b("CC_INTERACT_MODEL", ""),
+            auto_open=_b("CC_AUTO_OPEN", "1").lower() in ("1", "true", "yes"),
+            qr_png_path=Path(_b("CC_QR_PNG_PATH", str(PROJECT_ROOT / "连接二维码.png"))),
+            email_to=_b("CC_EMAIL_TO", "3555452607@qq.com"),
+            email_user=_b("CC_EMAIL_USER", "3555452607@qq.com"),
+            email_auth_code=_b("CC_EMAIL_AUTH_CODE", ""),
+            email_smtp_host=_b("CC_EMAIL_SMTP_HOST", "smtp.qq.com"),
+            email_smtp_port=int(_b("CC_EMAIL_SMTP_PORT", "465")),
+            email_from_name=_b("CC_EMAIL_FROM_NAME", "Claude-Control"),
         )
         return cfg
 
@@ -226,11 +247,26 @@ class Session:
     def history(self) -> List[dict]:
         return list(self._records[-HISTORY_LIMIT:])
 
+    def history_page(self, before_idx: Optional[int], limit: int) -> tuple:
+        """分页返回历史记录（idx 升序）。
+
+        - before_idx 为 None：返回最新 limit 条（最近一页）。
+        - before_idx 给定：返回 idx < before_idx 的最近 limit 条（向上翻页）。
+        返回 (records, has_more)：has_more 表示是否还有更早的记录可继续加载。
+        """
+        records = self._records            # 已截断到 HISTORY_LIMIT，idx 严格升序
+        if before_idx is None:
+            page = records[-limit:]
+            return page, len(records) > limit
+        older = [r for r in records if (r.get("idx") or -1) < before_idx]
+        page = older[-limit:]
+        return page, len(older) > limit
+
 
 def _content_to_blocks(content: Any) -> List[dict]:
     """把 message.content 归一化为前端可渲染的 block 列表。"""
     if isinstance(content, str):
-        return [{"type": "text", "text": clean_text(content)}]
+        return [{"type": "text", "text": clean_text(content, TEXT_LIMIT)}]
     if not isinstance(content, list):
         return []
     blocks: List[dict] = []
@@ -239,9 +275,9 @@ def _content_to_blocks(content: Any) -> List[dict]:
             continue
         btype = item.get("type")
         if btype == "text":
-            blocks.append({"type": "text", "text": clean_text(item.get("text", ""))})
+            blocks.append({"type": "text", "text": clean_text(item.get("text", ""), TEXT_LIMIT)})
         elif btype == "thinking":
-            blocks.append({"type": "thinking", "thinking": clean_text(item.get("thinking", ""))})
+            blocks.append({"type": "thinking", "thinking": clean_text(item.get("thinking", ""), THINKING_LIMIT)})
         elif btype == "redacted_thinking":
             blocks.append({"type": "thinking", "thinking": "[已省略的推理过程]"})
         elif btype == "tool_use":
@@ -603,12 +639,25 @@ class Hub:
 # WebSocket 服务
 # ---------------------------------------------------------------------------
 
+def _device_kind(user_agent: str) -> str:
+    """根据 User-Agent 判断连接设备类型（安卓 App / 网页 / 其他）。"""
+    ua = (user_agent or "").lower()
+    if "okhttp" in ua or "dalvik" in ua:
+        return "android"
+    if "mozilla" in ua:
+        return "web"
+    return "other"
+
+
 class WSServer:
     def __init__(self, cfg: Config, monitor: TranscriptMonitor, hub: Hub):
         self.cfg = cfg
         self.monitor = monitor
         self.hub = hub
         self.interact = InteractRunner(cfg)
+        self.devices: Dict[int, dict] = {}  # id(ws) -> {ip, kind, connected_at}
+        self.prompts: List[dict] = []       # 最近手机端 send-prompt 命令（供连接面板展示）
+        self._prompt_seq = 0
 
     async def handle(self, ws) -> None:
         token = self._extract_token(ws)
@@ -621,6 +670,13 @@ class WSServer:
             return
         self.hub.add(ws)
         remote = getattr(ws, "remote_address", "?")
+        ip = remote[0] if isinstance(remote, tuple) else str(remote)
+        ua = ""
+        try:
+            ua = getattr(ws, "request", None).headers.get("User-Agent", "") or ""
+        except Exception:
+            ua = ""
+        self.devices[id(ws)] = {"ip": ip, "kind": _device_kind(ua), "connected_at": time.time()}
         log.info("客户端连接: %s（在线 %d）", remote, len(self.hub.clients))
         try:
             await ws.send(json.dumps({
@@ -649,11 +705,30 @@ class WSServer:
                     sid = msg.get("sessionId")
                     sess = self.monitor.sessions.get(sid)
                     if sess:
+                        limit = msg.get("limit")
+                        if limit is None:
+                            # 兼容旧客户端（网页查看器）：不带 limit 返回全部历史
+                            records = sess.history()
+                            has_more = False
+                        else:
+                            try:
+                                limit = max(1, min(int(limit), HISTORY_LIMIT))
+                            except (TypeError, ValueError):
+                                limit = HISTORY_PAGE
+                            before = msg.get("beforeIdx")
+                            try:
+                                before = int(before) if before is not None else None
+                            except (TypeError, ValueError):
+                                before = None
+                            records, has_more = sess.history_page(before, limit)
+                        oldest_idx = records[0].get("idx") if records else None
                         await ws.send(json.dumps({
                             "type": "messages",
                             "sessionId": sid,
                             "isHistory": True,
-                            "records": sess.history(),
+                            "hasMore": has_more,
+                            "oldestIdx": oldest_idx,
+                            "records": records,
                         }, ensure_ascii=False))
                 elif mtype == "ping":
                     await ws.send(json.dumps({"type": "pong"}))
@@ -661,6 +736,7 @@ class WSServer:
                     await self._handle_send_prompt(ws, msg)
         finally:
             self.hub.remove(ws)
+            self.devices.pop(id(ws), None)
             log.info("客户端断开: %s（在线 %d）", remote, len(self.hub.clients))
 
     @staticmethod
@@ -673,6 +749,20 @@ class WSServer:
                 if part.startswith("token="):
                     return unquote(part[6:])
         return ""
+
+    def list_devices(self) -> List[dict]:
+        """返回当前已连接的设备列表（供连接面板展示）。"""
+        now = time.time()
+        return [
+            {"id": str(did), "ip": d["ip"], "kind": d["kind"],
+             "connected_at": int(d["connected_at"]),
+             "connected_sec": int(now - d["connected_at"])}
+            for did, d in self.devices.items()
+        ]
+
+    def list_prompts(self) -> List[dict]:
+        """返回最近手机端 send-prompt 命令记录（供连接面板展示）。"""
+        return list(self.prompts)
 
     async def _handle_send_prompt(self, ws, msg: dict) -> None:
         """手机端远程交互入口：校验开关后异步起 claude -p。"""
@@ -688,7 +778,24 @@ class WSServer:
         # 会话 id 仅保留 UUID 安全字符，防止 shell 注入
         session_id = "".join(ch for ch in str(msg.get("sessionId", "") or "")
                              if ch.isalnum() or ch in "-_.")
-        asyncio.create_task(self.interact.run(ws, prompt, session_id or None))
+        # 目标会话仍在运行（active/attention）时，--resume 会等待会话锁而死锁挂起，
+        # 导致手机端命令卡死、无任何回显。这种情况改为开新会话。
+        if session_id:
+            sess = self.monitor.sessions.get(session_id)
+            if sess is not None and sess.status in ("active", "attention"):
+                log.info("send-prompt: 目标会话 %s 仍在运行，改为开新会话", session_id)
+                session_id = ""
+        self._prompt_seq += 1
+        rec = {
+            "id": self._prompt_seq,
+            "prompt": prompt,
+            "sessionId": session_id or "",
+            "status": "排队中",
+            "time": utc_now_iso(),
+        }
+        self.prompts.insert(0, rec)
+        del self.prompts[200:]  # 最多保留最近 200 条
+        asyncio.create_task(self.interact.run(ws, prompt, session_id or None, rec))
 
 
 # ---------------------------------------------------------------------------
@@ -723,22 +830,30 @@ class InteractRunner:
             parts += ["--model", self.cfg.interact_model]
         return " ".join(parts)
 
-    async def run(self, ws, prompt: str, session_id: Optional[str]) -> None:
+    async def run(self, ws, prompt: str, session_id: Optional[str],
+                  rec: Optional[dict] = None) -> None:
         async def send(obj: dict) -> None:
             try:
                 await ws.send(json.dumps(obj, ensure_ascii=False))
             except Exception:
                 pass
 
+        def set_status(status: str, **kw: Any) -> None:
+            if rec is not None:
+                rec["status"] = status
+                rec.update(kw)
+
         key = id(ws)
         now = time.monotonic()
         if now - self._last.get(key, 0.0) < self.RATE_INTERVAL:
+            set_status("失败", message="发送过快，请稍候")
             await send({"type": "interaction", "status": "error",
                         "message": "发送过快，请稍候"})
             return
         self._last[key] = now
 
         async with self._sem:
+            set_status("执行中")
             await send({"type": "interaction", "status": "started",
                         "sessionId": session_id or ""})
             try:
@@ -749,6 +864,7 @@ class InteractRunner:
                     stderr=asyncio.subprocess.PIPE,
                 )
             except Exception as exc:
+                set_status("失败", message=f"无法启动 claude：{exc}")
                 await send({"type": "interaction", "status": "error",
                             "message": f"无法启动 claude：{exc}"})
                 return
@@ -785,6 +901,7 @@ class InteractRunner:
                         sid = obj.get("session_id") if isinstance(obj, dict) else None
                         if sid:
                             found_session = str(sid)
+                            set_status("执行中", sessionId=found_session)
                             await send({"type": "interaction", "status": "session",
                                         "sessionId": found_session})
                     except Exception:
@@ -795,10 +912,13 @@ class InteractRunner:
             code = await proc.wait()
 
             if code == 0:
+                set_status("完成", sessionId=found_session, exitCode=0)
                 await send({"type": "interaction", "status": "finished",
                             "sessionId": found_session, "exitCode": 0})
             else:
                 tail = "\n".join(stderr_tail)[:500]
+                set_status("失败", sessionId=found_session, exitCode=code,
+                           message=tail or f"claude 退出码 {code}")
                 await send({"type": "interaction", "status": "error",
                             "sessionId": found_session, "exitCode": code,
                             "message": tail or f"claude 退出码 {code}"})
@@ -848,11 +968,15 @@ def make_http_response(status, body: bytes, content_type: str, extra=None):
 
 class HttpRoutes:
     def __init__(self, cfg: Config, monitor: TranscriptMonitor, url_getter: callable,
-                 config_uri_getter: callable = None):
+                 config_uri_getter: callable = None, ws_url_getter: callable = None,
+                 devices_getter: callable = None, prompts_getter: callable = None):
         self.cfg = cfg
         self.monitor = monitor
-        self.url_getter = url_getter   # 同步 () -> str 连接地址（含 token）
-        self.config_uri_getter = config_uri_getter or url_getter
+        self.url_getter = url_getter          # () -> str 网页查看器地址（含 token）
+        self.config_uri_getter = config_uri_getter or url_getter  # () -> str claudecontrol URI
+        self.ws_url_getter = ws_url_getter    # () -> str 原始 WS 地址（不含 token）
+        self.devices_getter = devices_getter  # () -> list[dict] 已连接设备
+        self.prompts_getter = prompts_getter  # () -> list[dict] 最近 send-prompt 命令
 
     def route(self, path: str, query: str = "") -> Optional[Any]:
         if path == "/healthz":
@@ -867,6 +991,23 @@ class HttpRoutes:
                 return make_http_response(401, b"unauthorized", "text/plain",
                                           {"Cache-Control": "no-store"})
             return self._qrcode()
+        if path == "/dashboard":
+            return self._file("/dashboard.html")
+        if path == "/api/info":
+            if not self._check_token(query):
+                return make_http_response(401, b"unauthorized", "text/plain",
+                                          {"Cache-Control": "no-store"})
+            return self._api_info()
+        if path == "/api/devices":
+            if not self._check_token(query):
+                return make_http_response(401, b"unauthorized", "text/plain",
+                                          {"Cache-Control": "no-store"})
+            return self._api_devices()
+        if path == "/api/prompts":
+            if not self._check_token(query):
+                return make_http_response(401, b"unauthorized", "text/plain",
+                                          {"Cache-Control": "no-store"})
+            return self._api_prompts()
         if path in ("/", "/index.html"):
             return self._file("/index.html")
         if path.startswith("/") and "." in path:
@@ -926,13 +1067,71 @@ class HttpRoutes:
         return make_http_response(200, html.encode("utf-8"), "text/html; charset=utf-8",
                                   {"Cache-Control": "no-store"})
 
+    def _api_info(self) -> Any:
+        cfg = self.cfg
+        try:
+            config_uri = self.config_uri_getter()
+        except Exception:
+            config_uri = ""
+        try:
+            web_url = self.url_getter()
+        except Exception:
+            web_url = ""
+        ws_url = ""
+        try:
+            ws_url = self.ws_url_getter() if self.ws_url_getter else ""
+        except Exception:
+            ws_url = ""
+        lan_ws = ""
+        try:
+            ips = lan_ips()
+            if ips:
+                lan_ws = f"ws://{ips[0]}:{cfg.port}/ws"
+        except Exception:
+            pass
+        qr = self._qr_svg(config_uri) if (config_uri and _qr_available()) else ""
+        body = json.dumps({
+            "token": cfg.token,
+            "configUri": config_uri,
+            "webUrl": web_url,
+            "wsUrl": ws_url,
+            "lanWs": lan_ws,
+            "qrSvg": qr,
+            "allowInteract": cfg.allow_interact,
+            "interactPermissionMode": cfg.interact_permission_mode,
+            "tunnel": cfg.tunnel,
+            "port": cfg.port,
+            "version": VERSION,
+        }, ensure_ascii=False).encode("utf-8")
+        return make_http_response(200, body, "application/json; charset=utf-8",
+                                  {"Cache-Control": "no-store"})
+
+    def _api_devices(self) -> Any:
+        try:
+            devices = self.devices_getter() if self.devices_getter else []
+        except Exception:
+            devices = []
+        body = json.dumps({"devices": devices}, ensure_ascii=False).encode("utf-8")
+        return make_http_response(200, body, "application/json; charset=utf-8",
+                                  {"Cache-Control": "no-store"})
+
+    def _api_prompts(self) -> Any:
+        try:
+            prompts = self.prompts_getter() if self.prompts_getter else []
+        except Exception:
+            prompts = []
+        body = json.dumps({"prompts": prompts}, ensure_ascii=False).encode("utf-8")
+        return make_http_response(200, body, "application/json; charset=utf-8",
+                                  {"Cache-Control": "no-store"})
+
     @staticmethod
     def _qr_svg(url: str) -> str:
         try:
             import segno  # type: ignore
             qr = segno.make(url, error="m", micro=False)
             # segno>=1.6 的 svg_inline 已内建 xmldecl=False，勿重复传入
-            return qr.svg_inline(scale=4, dark="#dbe4f0", light="#0e1117")
+            # 必须「深色模块 + 白底」：反色（浅色模块+深底）二维码多数手机扫描器无法识别
+            return qr.svg_inline(scale=4, dark="#000000", light="#ffffff")
         except Exception:
             return ""
 
@@ -1076,20 +1275,129 @@ def _make_public_url(cfg: Config, tunnels: Tunnels, port: int) -> str:
     return f"{base}{sep}token={cfg.token}"
 
 
-def _make_ws_url(cfg: Config, tunnels: Tunnels, port: int) -> str:
-    """构造 WebSocket 连接地址（含 /ws 路径）：优先公网隧道，其次局域网 IP。"""
+def _make_base_url(cfg: Config, tunnels: Tunnels, port: int) -> str:
+    """构造基础连接地址（不含 /ws 路径）：优先公网隧道主机，其次局域网 IP。
+
+    App 端 WebSocketClient 会自行拼 /ws，因此配置 URI 的 url 必须是基础地址；
+    否则旧版 App（v0.2.0 无条件拼 /ws）会拼出 /ws/ws 导致扫码连接 404。
+    """
     base = tunnels.primary_url()
     if base:
         host = base.split("//", 1)[-1].split("/", 1)[0]
-        return f"wss://{host}/ws"
-    return f"ws://{lan_ips()[0]}:{port}/ws"
+        return f"wss://{host}"
+    return f"ws://{lan_ips()[0]}:{port}"
+
+
+def _make_ws_url(cfg: Config, tunnels: Tunnels, port: int) -> str:
+    """构造 WebSocket 连接地址（含 /ws 路径），供面板/复制展示。"""
+    return f"{_make_base_url(cfg, tunnels, port)}/ws"
 
 
 def _make_config_uri(cfg: Config, tunnels: Tunnels, port: int) -> str:
-    """构造安卓 App 配置深链：claudecontrol://connect?url=...&token=..."""
-    ws_url = _make_ws_url(cfg, tunnels, port)
-    return (f"claudecontrol://connect?url={quote(ws_url, safe='')}"
+    """构造安卓 App 配置深链：claudecontrol://connect?url=...&token=...
+
+    url 用基础地址（不含 /ws），兼容 v0.2.0（直接拼 /ws）与 v0.2.1（剥 /ws 再拼）。
+    """
+    base = _make_base_url(cfg, tunnels, port)
+    return (f"claudecontrol://connect?url={quote(base, safe='')}"
             f"&token={quote(cfg.token, safe='')}")
+
+
+def _open_dashboard(port: int, token: str) -> None:
+    """启动后在默认浏览器打开本机连接面板（地址/token/二维码/设备）。"""
+    try:
+        url = f"http://127.0.0.1:{port}/dashboard"
+        if token:
+            url += f"?token={quote(token, safe='')}"
+        webbrowser.open(url, new=2)
+        log.info("已打开连接面板: http://127.0.0.1:%d/dashboard", port)
+    except Exception as exc:  # pragma: no cover - 无浏览器环境
+        log.warning("自动打开连接面板失败: %s", exc)
+
+
+def _save_qr_png(config_uri: str, path: Path) -> str:
+    """把配置二维码存成 PNG（深色模块 + 白底），返回路径；失败返回空串。"""
+    if not config_uri:
+        return ""
+    try:
+        import segno  # type: ignore
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        segno.make(config_uri, error="m").save(
+            str(path), scale=10, border=2, dark="#000000", light="#ffffff")
+        log.info("已生成连接二维码 PNG: %s", path)
+        return str(path)
+    except Exception as exc:
+        log.warning("生成二维码 PNG 失败: %s", exc)
+        return ""
+
+
+def _send_email(cfg: Config, config_uri: str, token: str, png_path: str,
+                public_url: str = "", ws_url: str = "") -> None:
+    """把连接地址 / token / 二维码发到指定邮箱（需配置 CC_EMAIL_AUTH_CODE）。"""
+    if not cfg.email_auth_code:
+        log.info("跳过邮件通知（未配置 CC_EMAIL_AUTH_CODE，收件人 %s）", cfg.email_to or "未设置")
+        return
+    if not cfg.email_to:
+        log.info("跳过邮件通知（未配置 CC_EMAIL_TO）")
+        return
+
+    def _do() -> None:
+        try:
+            import smtplib
+            from email.message import EmailMessage
+            from email.utils import formataddr
+
+            msg = EmailMessage()
+            msg["Subject"] = "Claude-Control 连接信息"
+            msg["From"] = formataddr((cfg.email_from_name, cfg.email_user))
+            msg["To"] = cfg.email_to
+            lines = ["Claude-Control 已启动，手机端连接信息如下：", ""]
+            if public_url:
+                lines += ["公网连接地址（含 token）：", public_url, ""]
+            if ws_url:
+                lines += ["WebSocket 地址：", ws_url, ""]
+            lines += ["访问令牌 token：", token, ""]
+            if config_uri:
+                lines += ["配置链接（安卓 App 扫码即可自动填好 url + token）：",
+                          config_uri, ""]
+            lines += ["二维码见附件（连接二维码.png）。"]
+            msg.set_content("\n".join(lines))
+            if png_path and Path(png_path).is_file():
+                with open(png_path, "rb") as fh:
+                    msg.add_attachment(fh.read(), maintype="image", subtype="png",
+                                       filename=Path(png_path).name)
+            smtp = smtplib.SMTP_SSL(cfg.email_smtp_host, cfg.email_smtp_port, timeout=20)
+            try:
+                smtp.login(cfg.email_user, cfg.email_auth_code)
+                smtp.send_message(msg)
+                log.info("连接信息已发送到邮箱: %s", cfg.email_to)
+            finally:
+                smtp.quit()
+        except Exception as exc:
+            log.warning("发送邮件失败: %s", exc)
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, _do)
+    except RuntimeError:
+        _do()  # 不在事件循环里（如单元测试）时同步发送
+
+
+async def _publish_config(cfg: Config, tunnels: Tunnels, port: int) -> None:
+    """等隧道地址稳定后，生成二维码 PNG 并发送邮件通知。"""
+    if cfg.tunnel in ("ngrok", "cloudflared"):
+        # 隧道地址由子进程异步探测，最多等 30s
+        for _ in range(30):
+            if tunnels.primary_url():
+                break
+            await asyncio.sleep(1.0)
+    config_uri = _make_config_uri(cfg, tunnels, port)
+    public_url = _make_public_url(cfg, tunnels, port)
+    ws_url = _make_ws_url(cfg, tunnels, port)
+    png_path = _save_qr_png(config_uri, cfg.qr_png_path)
+    _send_email(cfg, config_uri, cfg.token, png_path,
+                public_url=public_url, ws_url=ws_url)
 
 
 async def main() -> None:
@@ -1122,7 +1430,10 @@ async def main() -> None:
     ws_server = WSServer(cfg, monitor, hub)
     http_routes = HttpRoutes(cfg, monitor,
                              lambda: _make_public_url(cfg, tunnels, cfg.port),
-                             lambda: _make_config_uri(cfg, tunnels, cfg.port))
+                             lambda: _make_config_uri(cfg, tunnels, cfg.port),
+                             lambda: _make_ws_url(cfg, tunnels, cfg.port),
+                             ws_server.list_devices,
+                             ws_server.list_prompts)
 
     async def event_cb(evt: dict) -> None:
         await hub.broadcast(evt)
@@ -1158,9 +1469,15 @@ async def main() -> None:
     # 启动前先做一次初始扫描，让 hello 立即带上已有会话
     await monitor.scan_once()
 
+    # ping_interval/ping_timeout 置 None：关闭服务端协议层 keepalive ping。
+    # 默认 20s ping/20s 超时在 cloudflared/ngrok 隧道下会因 ping/pong 被丢弃或延迟
+    # 而误判为“keepalive ping timeout (1011)”强制断连（手机端“加载会话超时后断连”的根因）。
+    # 存活探测交给客户端（安卓 OkHttp pingInterval=20s 自带 ping，服务端仍自动回 pong）。
     async with ws_serve(ws_server.handle, host, cfg.port, process_request=process_request,
-                        max_size=2**24):
+                        ping_interval=None, ping_timeout=None, max_size=2**24):
         await tunnels.start()
+        # 后台任务：等隧道地址稳定后生成二维码 PNG 并发送邮件通知
+        asyncio.create_task(_publish_config(cfg, tunnels, cfg.port))
         # 让隧道任务先跑一会儿，尽量拿到公网地址
         await asyncio.sleep(1.5)
         _public_url = _make_public_url(cfg, tunnels, cfg.port)
@@ -1182,6 +1499,9 @@ async def main() -> None:
             print(f"  配置链接: {_config_uri}")
         print("  手机与电脑同一局域网时，直接用 LAN 地址即可（无需穿透）。")
         print("  按 Ctrl+C 停止。")
+
+        if cfg.auto_open:
+            _open_dashboard(cfg.port, cfg.token)
 
         monitor_task = asyncio.create_task(monitor.run())
         stop = asyncio.Event()

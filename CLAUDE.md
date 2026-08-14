@@ -11,6 +11,7 @@
 - **安全**：WebSocket 连接携带预共享 token（`?token=...`），防止匿名访问。
 - **远程交互**：手机端发 `send-prompt`，中继异步起 `claude -p` 无头子进程在电脑上执行（需 `CC_ALLOW_INTERACT=1` 显式开启），结果经转录监控链路实时回显。
 - **扫码自动配置**：启动时打印「配置二维码」（`claudecontrol://connect?url=...&token=...`），手机 App 扫码自动填好 URL + token 并连接。
+- **连接面板**：启动时自动在浏览器打开 `/dashboard`，集中显示公网/局域网 URL、token、配置二维码与已连接设备。
 
 ## 架构
 
@@ -24,7 +25,9 @@
 │  computer/relay_server.py:                   │
 │  - TranscriptMonitor 只读扫描 + 增量读取      │
 │  - WebSocket 中继 (ws://host:9876/ws)        │
-│  - HTTP: /  网页查看器  /qrcode  /healthz    │
+│  - HTTP: / 网页查看器  /dashboard 连接面板   │
+│          /qrcode  /api/info  /api/devices    │
+│          /healthz                           │
 │  - 内网穿透: lan / ngrok / cloudflared       │
 └────────┼─────────────────────────────────────┘
          │ 局域网直连 或 ngrok/cloudflared 隧道
@@ -59,6 +62,7 @@
 | 远程交互 | `CC_ALLOW_INTERACT` | `0` | `1` 开启手机端发送 prompt（远程执行，慎开） |
 | 交互权限 | `CC_INTERACT_PERMISSION_MODE` | `bypassPermissions` | `bypassPermissions`/`acceptEdits`/`plan` |
 | 交互模型 | `CC_INTERACT_MODEL` | 空 | 留空用默认模型 |
+| 自动打开面板 | `CC_AUTO_OPEN` | `1` | 启动时在浏览器打开连接面板（`0` 关闭） |
 | 调试 | `CC_DEBUG` | `0` | 打印详细日志 |
 
 WS 消息协议：
@@ -67,7 +71,7 @@ WS 消息协议：
 - 客户端发：`get-history` / `list-sessions` / `send-prompt` / `ping`。
 - `send-prompt`（需 `CC_ALLOW_INTERACT=1`）异步起 `claude -p` 执行；服务端回 `interaction` 状态帧（`started` → `session` → `finished`/`error`），内容回显复用 `messages` 链路。
 - `messages` 携带 `isHistory`（历史回放）与 `update`（就地补全：tool_result 合并到已广播的 tool_use）标志；网页端/安卓端按 `idx` 去重 / 替换。
-- `get-history` 有每连接 0.3s 限流；无 token 的 `/qrcode` 访问被拒（返回 401），避免内嵌 token 泄露。
+- `get-history` 有每连接 0.3s 限流；无 token 的 `/qrcode` 与 `/api/info`、`/api/devices` 访问被拒（返回 401），避免内嵌 token 泄露。
 - 会话状态：`active` / `attention`（存在待批准工具调用）/ `idle` / `ended`，依据 mtime + 待定工具判定；每个会话最多保留 `HISTORY_LIMIT` 条记录，会话数超 `MAX_SESSIONS` 后驱逐已结束会话。
 
 ## 目录结构
@@ -80,7 +84,7 @@ Claude-Control/
 │   └── settings.json       # 项目级插件启用配置
 ├── computer/               # 电脑端：中继 + 网页查看器
 │   ├── relay_server.py     # 核心服务
-│   ├── web/                # 网页查看器 (index.html/styles.css/app.js)
+│   ├── web/                # 网页查看器 + 连接面板 (index.html/dashboard.html/...)
 │   ├── tests/              # mock_transcript.py + test_e2e.py
 │   ├── requirements.txt    # websockets>=16, python-dotenv, segno
 │   ├── requirements-ngrok.txt # pyngrok（可选）
@@ -121,4 +125,4 @@ Claude-Control/
 - **平台**：本机为 Windows 11。JSONL 转录由 Claude Code 追加写入，中继必须只读；`PYTHONUTF8=1` 可避免 GBK 编码错误。
 - **敏感配置**：`CC_TOKEN` 与 `CC_NGROK_AUTH_TOKEN` 不应硬编码提交；以 `.env`（已在 `.gitignore`）或环境变量注入。
 - **依赖版本**：`websockets>=16`（v17 的 `Response` 为 4 字段 dataclass）、`segno`（终端 ANSI + SVG 二维码）。
-- **测试**：`python tests/test_e2e.py` 起临时服务跑通 25 项断言（HTTP/WS 鉴权/history/合并/广播/状态/交互/配置 URI）。
+- **测试**：`python tests/test_e2e.py` 起临时服务跑通 30 项断言（HTTP/WS 鉴权/history/合并/广播/状态/交互/配置 URI/连接面板）。

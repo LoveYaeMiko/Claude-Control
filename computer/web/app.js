@@ -13,12 +13,15 @@ const els = {
 };
 
 const STATUS_TEXT = { active: '进行中', attention: '等待审批', idle: '空闲', ended: '已结束' };
+const HISTORY_PAGE = 50;      // 分页大小：每页最多渲染的记录数
+let deepLinkSession = new URLSearchParams(location.search).get('session');  // dashboard 跳转的会话
 
 const state = {
   ws: null,
   sessions: new Map(),       // id -> summary
   selected: null,            // selected sessionId
   messages: new Map(),       // sessionId -> [record, ...] (render cache)
+  paging: new Map(),         // sessionId -> { oldestIdx, hasMore, loading }
   autoScroll: true,
   reconnectDelay: 1000,
   reconnectTimer: null,
@@ -89,6 +92,11 @@ function rebuildSelector() {
     const active = sessions.find(s => s.status === 'active' || s.status === 'attention') || sessions[0];
     els.sessionSelect.value = active.id;
   }
+  // dashboard 深链：优先选中指定会话（仅应用一次）
+  if (deepLinkSession && state.sessions.has(deepLinkSession)) {
+    els.sessionSelect.value = deepLinkSession;
+    deepLinkSession = null;
+  }
   const target = els.sessionSelect.value;
   if (target !== state.selected) selectSession(target);
 }
@@ -100,7 +108,11 @@ function selectSession(id) {
   renderEmpty('正在加载会话历史…');
   if (id) {
     state.historyReq = id;
-    send({ type: 'get-history', sessionId: id });
+    // 重置分页状态与渲染缓存，只拉最近一页，滚动上翻再加载更早记录
+    state.paging.set(id, { oldestIdx: null, hasMore: true, loading: false });
+    state.messages.set(id, []);
+    state.rendered.clear();
+    send({ type: 'get-history', sessionId: id, limit: HISTORY_PAGE });
   }
 }
 
@@ -225,22 +237,11 @@ function summarizeInput(input) {
 
 /* ---------------- message handling ---------------- */
 
-function appendRecords(records, isHistory) {
+function appendRecords(records) {
   if (!records || !records.length) return;
   const sessionId = records[0].sessionId;
   const isSelected = sessionId === state.selected;
   const cache = state.messages.get(sessionId) || [];
-
-  if (isHistory) {
-    state.messages.set(sessionId, records.slice());
-    if (isSelected) {
-      els.conversation.innerHTML = '';
-      state.rendered.clear();
-      records.forEach(r => renderRecord(r));
-      scrollToBottom();
-    }
-    return;
-  }
 
   let added = 0;
   records.forEach(rec => {
@@ -252,6 +253,53 @@ function appendRecords(records, isHistory) {
   });
   state.messages.set(sessionId, cache);
   if (isSelected && added) scrollToBottomIfAuto();
+}
+
+// 分页历史：首屏整批替换，向上翻页时插到头部并保持滚动位置
+function appendHistory(data) {
+  const sessionId = data.sessionId;
+  const records = data.records || [];
+  const cache = state.messages.get(sessionId) || [];
+  const paging = state.paging.get(sessionId) || { oldestIdx: null, hasMore: true, loading: false };
+  paging.loading = false;
+  paging.hasMore = !!data.hasMore;
+  if (records.length) {
+    const oldest = records.reduce(
+      (m, r) => (r.idx != null && (m == null || r.idx < m)) ? r.idx : m, paging.oldestIdx);
+    paging.oldestIdx = oldest;
+  }
+  state.paging.set(sessionId, paging);
+
+  const isSelected = sessionId === state.selected;
+  const isFirstPage = cache.length === 0;
+
+  if (isFirstPage) {
+    state.messages.set(sessionId, records.slice());
+    if (isSelected) {
+      els.conversation.innerHTML = '';
+      state.rendered.clear();
+      records.forEach(r => renderRecord(r));
+      scrollToBottom();
+    }
+    return;
+  }
+
+  // 更早的一页：去重后插到缓存头部
+  const seen = new Set(cache.map(r => r.idx));
+  const fresh = records.filter(r => r.idx == null || !seen.has(r.idx));
+  if (!fresh.length) { state.messages.set(sessionId, cache); return; }
+  state.messages.set(sessionId, fresh.concat(cache));
+  if (isSelected) prependRendered(fresh);
+}
+
+// 在 DOM 顶部插入更早的记录，并补偿新增高度，保持用户当前阅读位置不跳动
+function prependRendered(records) {
+  const prevHeight = els.conversation.scrollHeight;
+  const prevTop = els.conversation.scrollTop;
+  const frag = document.createDocumentFragment();
+  records.forEach(r => { const el = buildRecordEl(r); if (el) frag.appendChild(el); });
+  els.conversation.prepend(frag);
+  els.conversation.scrollTop = prevTop + (els.conversation.scrollHeight - prevHeight);
 }
 
 // 服务端已就地补上 tool_result 的历史记录，按 idx 替换本地缓存与 DOM 节点
@@ -279,21 +327,27 @@ function applyRecordUpdates(records, sessionId) {
   state.messages.set(sessionId, cache);
 }
 
-function renderRecord(rec) {
+// 只构建 DOM 元素（不插入、不动光标），供 append / prepend 共用
+function buildRecordEl(rec) {
   let el;
   if (rec.role) {
-    removeCursor();
     el = buildMessage(rec);
-    els.conversation.appendChild(el);
-    if (rec.role === 'assistant') addCursor();
   } else if (rec.kind === 'sys') {
     el = buildBlock({ type: 'sys', text: rec.text });
-    els.conversation.appendChild(el);
   }
   if (el && rec.idx != null) {
     el.dataset.idx = rec.idx;
     state.rendered.set(rec.idx, el);
   }
+  return el;
+}
+
+function renderRecord(rec) {
+  if (rec.role) removeCursor();
+  const el = buildRecordEl(rec);
+  if (!el) return;
+  els.conversation.appendChild(el);
+  if (rec.role === 'assistant') addCursor();
 }
 
 function addCursor() {
@@ -318,7 +372,19 @@ function scrollToBottom() {
 
 els.conversation.addEventListener('scroll', () => {
   state.autoScroll = els.conversation.scrollHeight - els.conversation.scrollTop - els.conversation.clientHeight < 60;
+  // 滚动到顶部且还有更早记录时，加载上一页
+  if (els.conversation.scrollTop <= 0) maybeLoadOlder();
 });
+
+function maybeLoadOlder() {
+  const id = state.selected;
+  if (!id) return;
+  const paging = state.paging.get(id);
+  if (!paging || !paging.hasMore || paging.loading || paging.oldestIdx == null) return;
+  paging.loading = true;
+  state.paging.set(id, paging);
+  send({ type: 'get-history', sessionId: id, beforeIdx: paging.oldestIdx, limit: HISTORY_PAGE });
+}
 
 /* ---------------- websocket ---------------- */
 
@@ -383,11 +449,11 @@ function handleMessage(data) {
     case 'messages':
       if (data.isHistory && data.sessionId !== state.historyReq) break; // 过期历史，丢弃
       if (data.isHistory) {
-        appendRecords(data.records || [], true);
+        appendHistory(data);
       } else if (data.update) {
         applyRecordUpdates(data.records || [], data.sessionId);
       } else {
-        appendRecords(data.records || [], false);
+        appendRecords(data.records || []);
       }
       break;
     case 'session-start':

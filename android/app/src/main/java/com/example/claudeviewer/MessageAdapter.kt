@@ -52,6 +52,16 @@ class MessageAdapter : RecyclerView.Adapter<MessageAdapter.VH>() {
         notifyDataSetChanged()
     }
 
+    /** 向上翻页：把更早的记录（idx 升序）插到列表头部，返回实际插入条数。 */
+    fun prepend(list: List<ViewMessage>): Int {
+        val toAdd = list.filter { m -> m.idx == null || m.idx !in seenIdxs }
+        toAdd.forEach { m -> m.idx?.let { seenIdxs.add(it) } }
+        if (toAdd.isEmpty()) return 0
+        items.addAll(0, toAdd)
+        notifyItemRangeInserted(0, toAdd.size)
+        return toAdd.size
+    }
+
     private fun appendRecord(m: ViewMessage) {
         m.idx?.let { seenIdxs.add(it) }
         items.add(m)

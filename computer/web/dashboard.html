@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude-Control 连接面板</title>
+<style>
+  :root {
+    --bg: #0e1117; --surface: #161b22; --border: #30363d;
+    --text: #dbe4f0; --muted: #8b98ab; --accent: #58a6ff;
+    --ok: #3fb950; --err: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  .wrap { max-width: 640px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 20px; }
+  .card { background: var(--surface); border: 1px solid var(--border);
+          border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .card h2 { font-size: 13px; margin: 0 0 12px; color: var(--muted);
+             text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
+  .row { display: flex; align-items: center; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
+  .label { color: var(--muted); font-size: 12px; min-width: 72px; }
+  .mono { font-family: ui-monospace, Consolas, monospace; font-size: 13px; word-break: break-all; }
+  .val { flex: 1; min-width: 0; }
+  button.copy { background: #21262d; border: 1px solid var(--border); color: var(--text);
+                border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
+  button.copy:hover { background: #30363d; }
+  .qr { display: flex; justify-content: center; padding: 8px 0; }
+  .qr svg { max-width: 240px; height: auto; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; }
+  .badge.on { background: rgba(63,185,80,.15); color: var(--ok); }
+  .badge.off { background: rgba(248,81,73,.15); color: var(--err); }
+  .dev { display: flex; align-items: center; gap: 10px; padding: 9px 0;
+         border-top: 1px solid var(--border); font-size: 13px; }
+  .dev:first-of-type { border-top: none; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); flex: none; }
+  .dev .meta { color: var(--muted); margin-left: auto; font-size: 12px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 8px 0; }
+  .prompt { display: flex; flex-direction: column; gap: 4px; padding: 9px 0;
+            border-top: 1px solid var(--border); }
+  .prompt:first-child { border-top: none; }
+  .prompt .txt { font-size: 13px; word-break: break-all; white-space: pre-wrap; }
+  .prompt .meta { color: var(--muted); font-size: 12px; }
+  .st { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; }
+  input.token { width: 100%; background: #0d1117; border: 1px solid var(--border);
+                border-radius: 6px; color: var(--text); padding: 8px 10px; font-family: monospace; }
+  .err { color: var(--err); font-size: 13px; }
+  a { color: var(--accent); text-decoration: none; }
+</style>
+<body>
+<div class="wrap">
+  <h1>Claude-Control 连接面板</h1>
+  <p class="sub">扫码或手动填入手机 App，实时查看当前已连接的设备。</p>
+
+  <div class="card" id="token-card" hidden>
+    <h2>访问令牌</h2>
+    <input class="token" id="token-input" placeholder="请输入访问 token" autocomplete="off">
+    <div class="row" style="margin-top:10px">
+      <button class="copy" id="token-go">确定</button>
+    </div>
+    <p class="err" id="token-err" hidden>token 无效</p>
+  </div>
+
+  <div class="card" id="info-card" hidden>
+    <h2>连接信息</h2>
+    <div class="row"><span class="label">Token</span>
+      <span class="mono val" id="token">—</span>
+      <button class="copy" data-copy="token">复制</button></div>
+    <div class="row"><span class="label">公网 WS</span>
+      <span class="mono val" id="ws-url">—</span>
+      <button class="copy" data-copy="ws-url">复制</button></div>
+    <div class="row"><span class="label">局域网 WS</span>
+      <span class="mono val" id="lan-url">—</span>
+      <button class="copy" data-copy="lan-url">复制</button></div>
+    <div class="row"><span class="label">网页查看器</span>
+      <span class="mono val"><a id="web-url" target="_blank">—</a></span></div>
+    <div class="row"><span class="label">远程交互</span>
+      <span class="badge off" id="interact">—</span></div>
+  </div>
+
+  <div class="card" id="qr-card" hidden>
+    <h2>扫码连接</h2>
+    <div class="qr" id="qr"></div>
+    <p class="sub" style="margin:8px 0 0">安卓 App「扫码连接」扫描即可自动配置 URL + token</p>
+  </div>
+
+  <div class="card" id="dev-card" hidden>
+    <h2>已连接设备 <span class="meta" id="dev-count"></span></h2>
+    <div id="devices"></div>
+  </div>
+
+  <div class="card" id="prompt-card" hidden>
+    <h2>手机端命令</h2>
+    <div id="prompts"></div>
+  </div>
+</div>
+
+<script>
+const qs = new URLSearchParams(location.search);
+let token = qs.get('token') || '';
+const $ = id => document.getElementById(id);
+
+function fmtDur(s) {
+  if (s < 60) return s + ' 秒';
+  if (s < 3600) return Math.floor(s / 60) + ' 分 ' + (s % 60) + ' 秒';
+  return Math.floor(s / 3600) + ' 小时 ' + Math.floor((s % 3600) / 60) + ' 分';
+}
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function loadInfo() {
+  if (!token) { $('token-card').hidden = false; return; }
+  const r = await fetch('/api/info?token=' + encodeURIComponent(token));
+  if (r.status === 401) {
+    $('token-card').hidden = false;
+    $('info-card').hidden = true; $('qr-card').hidden = true; $('dev-card').hidden = true;
+    $('token-err').hidden = false;
+    return;
+  }
+  const d = await r.json();
+  $('token-err').hidden = true;
+  $('token-card').hidden = true;
+  $('info-card').hidden = false; $('qr-card').hidden = false; $('dev-card').hidden = false; $('prompt-card').hidden = false;
+  $('token').textContent = d.token || '—';
+  $('ws-url').textContent = d.wsUrl || '（隧道建立中…）';
+  $('lan-url').textContent = d.lanWs || '—';
+  $('web-url').textContent = d.webUrl || '—';
+  $('web-url').href = d.webUrl || '#';
+  $('interact').textContent = d.allowInteract ? ('已开启 · ' + d.interactPermissionMode) : '已关闭';
+  $('interact').className = 'badge ' + (d.allowInteract ? 'on' : 'off');
+  if (d.qrSvg) $('qr').innerHTML = d.qrSvg;
+}
+
+async function loadDevices() {
+  if (!token) return;
+  const r = await fetch('/api/devices?token=' + encodeURIComponent(token));
+  if (r.status !== 200) return;
+  const d = await r.json();
+  const devs = d.devices || [];
+  const box = $('devices');
+  $('dev-count').textContent = devs.length ? ('· ' + devs.length + ' 台') : '';
+  if (!devs.length) {
+    box.innerHTML = '<div class="empty">暂无设备连接（打开手机 App 或网页查看器后自动出现）</div>';
+    return;
+  }
+  box.innerHTML = devs.map(dev => {
+    const kindLabel = { android: '安卓 App', web: '网页查看器', other: '其他' }[dev.kind] || dev.kind;
+    return '<div class="dev"><span class="dot"></span><span>' + kindLabel + '</span>' +
+           '<span class="mono">' + dev.ip + '</span>' +
+           '<span class="meta">已连接 ' + fmtDur(dev.connected_sec) + '</span></div>';
+  }).join('');
+}
+
+async function loadPrompts() {
+  if (!token) return;
+  const r = await fetch('/api/prompts?token=' + encodeURIComponent(token));
+  if (r.status !== 200) return;
+  const d = await r.json();
+  const list = d.prompts || [];
+  const box = $('prompts');
+  if (!list.length) {
+    box.innerHTML = '<div class="empty">暂无命令（在手机 App 发送 prompt 后这里会实时显示）</div>';
+    return;
+  }
+  box.innerHTML = list.map(p => {
+    const colors = { '完成': 'var(--ok)', '失败': 'var(--err)',
+                     '执行中': 'var(--accent)', '排队中': 'var(--muted)' };
+    const color = colors[p.status] || 'var(--muted)';
+    const sid = p.sessionId
+      ? '<div class="meta">会话 <a href="/?session=' + encodeURIComponent(p.sessionId) +
+        '&token=' + encodeURIComponent(token) + '" target="_blank" rel="noopener">' +
+        escapeHtml(p.sessionId) + ' ↗</a></div>'
+      : '';
+    const err = p.message ? '<div class="meta" style="color:var(--err)">' + escapeHtml(p.message) + '</div>' : '';
+    const exit = (p.exitCode !== undefined && p.exitCode !== null) ? ' · exit ' + p.exitCode : '';
+    return '<div class="prompt">' +
+      '<div><span class="st" style="color:' + color + ';border:1px solid ' + color + '">' + escapeHtml(p.status) + '</span></div>' +
+      '<div class="txt">' + escapeHtml(p.prompt) + '</div>' +
+      '<div class="meta">' + (p.time || '') + exit + '</div>' +
+      sid + err +
+      '</div>';
+  }).join('');
+}
+
+document.querySelectorAll('button[data-copy]').forEach(b => {
+  b.addEventListener('click', () => {
+    const t = $(b.dataset.copy).textContent;
+    if (navigator.clipboard) navigator.clipboard.writeText(t);
+    const old = b.textContent; b.textContent = '已复制';
+    setTimeout(() => b.textContent = old, 1200);
+  });
+});
+
+$('token-go').addEventListener('click', () => {
+  token = $('token-input').value.trim();
+  loadInfo(); loadDevices();
+});
+$('token-input').addEventListener('keydown', e => { if (e.key === 'Enter') $('token-go').click(); });
+
+loadInfo();
+loadDevices();
+loadPrompts();
+setInterval(loadDevices, 2000);
+setInterval(loadPrompts, 2000);
+setInterval(loadInfo, 5000);
+</script>
+</body>
+</html>

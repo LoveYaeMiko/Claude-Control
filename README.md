@@ -18,6 +18,7 @@ Windows 也可直接双击 `start.bat`（自动建 venv、装依赖、启动）�
 
 启动后终端会打印：
 
+- 默认自动在浏览器打开**连接面板** `http://127.0.0.1:9876/dashboard`（集中显示 URL、token、配置二维码与已连接设备；`CC_AUTO_OPEN=0` 可关闭）
 - 本地地址 `ws://127.0.0.1:9876`（手机同一局域网可直接连）
 - ngrok/cloudflared 公网地址（若设置了隧道）
 - **配置二维码**（`claudecontrol://connect` URI），安卓 App 扫码即可自动填好 URL + token 并连接
@@ -83,6 +84,7 @@ Windows 也可直接双击 `start.bat`（自动建 venv、装依赖、启动）�
 | `CC_ALLOW_INTERACT` | `0` | `1` 开启手机端远程交互（远程执行，慎开） |
 | `CC_INTERACT_PERMISSION_MODE` | `bypassPermissions` | 交互权限：`bypassPermissions` / `acceptEdits` / `plan` |
 | `CC_INTERACT_MODEL` | 空 | 交互所用模型（留空用默认） |
+| `CC_AUTO_OPEN` | `1` | 启动时自动在浏览器打开连接面板（`0` 关闭） |
 | `CC_DEBUG` | `0` | 调试日志 |
 
 ## 目录
@@ -103,7 +105,7 @@ Windows 也可直接双击 `start.bat`（自动建 venv、装依赖、启动）�
 - ✅ 插件初始化（feature-dev、mattpocock-skills 项目级注册）
 - ✅ 电脑端中继服务 `relay_server.py`（转录监控 + WS + HTTP + 二维码 + 隧道，约 1030 行）
 - ✅ 网页查看器（暗色主题、会话切换、流式追加、思考/工具折叠）
-- ✅ 端到端测试 25 项断言通过（含 `/qrcode` 鉴权、`update` 实时合并、交互与配置 URI）
+- ✅ 端到端测试 30 项断言通过（含 `/qrcode` 鉴权、`update` 实时合并、交互、配置 URI 与连接面板）
 - ✅ 安卓 App 完整实现（Material3 UI + Markdown 富文本渲染 + 会话状态色点 + 智能滚动）
 - ✅ 公网联调测试通过（cloudflared 隧道：`/healthz`、`/qrcode` 鉴权、`wss://` 均验证）
 - ✅ 安卓 release APK 打包 + 签名（`Claude-Control-v0.2.0.apk`）

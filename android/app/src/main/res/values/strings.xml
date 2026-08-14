@@ -29,6 +29,7 @@
     <string name="truncated">…（已截断）</string>
     <string name="blank_block">（空）</string>
     <string name="unnamed_session">未命名会话</string>
+    <string name="select_session_hint">— 选择要查看的会话 —</string>
     <string name="input_url_required">请输入 WebSocket 地址</string>
     <string name="connect_failed">连接失败: %1$s</string>
 

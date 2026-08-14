@@ -56,7 +56,9 @@ async def main() -> int:
         tunnel_uri = relay_server._make_config_uri(
             relay_server.Config(port=9876, token=token, tunnel="cloudflared"),
             _TunnelsStub("https://abc.trycloudflare.com"), 9876)
-        check("隧道配置 URI 用 wss", "url=wss%3A%2F%2Fabc.trycloudflare.com%2Fws" in tunnel_uri)
+        check("隧道配置 URI 用 wss 基础地址（不含 /ws）",
+              "url=wss%3A%2F%2Fabc.trycloudflare.com" in tunnel_uri
+              and "%2Fws" not in tunnel_uri)
 
         env = dict(os.environ)
         env["CC_TRANSCRIPTS_DIR"] = str(root)
@@ -64,6 +66,9 @@ async def main() -> int:
         env["CC_TUNNEL"] = "none"
         env["CC_PORT"] = str(port)
         env["PYTHONUTF8"] = "1"
+        env["CC_AUTO_OPEN"] = "0"   # 测试环境不自动打开浏览器
+        env["CC_ALLOW_INTERACT"] = "0"   # 固定关闭，验证禁用态返回 error（隔离 .env 干扰）
+        env["CC_QR_PNG_PATH"] = str(root / "qr_test.png")  # 二维码 PNG 写到临时目录，避免污染项目根目录
 
         proc = await asyncio.create_subprocess_exec(
             sys.executable, "relay_server.py",
@@ -89,6 +94,13 @@ async def main() -> int:
                 except Exception:
                     await asyncio.sleep(0.25)
 
+            # 后台任务应在启动后生成二维码 PNG（tunnel=none 时无需等隧道）
+            for _ in range(20):
+                if (root / "qr_test.png").exists():
+                    break
+                await asyncio.sleep(0.25)
+            check("启动生成二维码 PNG 到指定路径", (root / "qr_test.png").exists())
+
             import websockets
             from websockets.asyncio.client import connect as ws_connect
 
@@ -107,6 +119,23 @@ async def main() -> int:
                 check("HTTP /qrcode 无 token 被拒", e.code == 401)
             qr = urllib.request.urlopen(base + "/qrcode?token=" + token, timeout=3).read().decode("utf-8")
             check("HTTP /qrcode 带 token 返回页面", "Claude" in qr or "svg" in qr.lower())
+            # 连接面板 / 信息 API / 设备 API
+            dash = urllib.request.urlopen(base + "/dashboard", timeout=3).read().decode("utf-8")
+            check("HTTP /dashboard 返回面板", "连接面板" in dash and "已连接设备" in dash)
+            try:
+                urllib.request.urlopen(base + "/api/info", timeout=3).read()
+                check("HTTP /api/info 无 token 被拒", False)
+            except urllib.error.HTTPError as e:
+                check("HTTP /api/info 无 token 被拒", e.code == 401)
+            info = json.loads(urllib.request.urlopen(
+                base + "/api/info?token=" + token, timeout=3).read())
+            check("HTTP /api/info 返回 token/配置 URI",
+                  info.get("token") == token
+                  and info.get("configUri", "").startswith("claudecontrol://connect?"))
+            check("HTTP /api/info 含二维码 SVG", "svg" in (info.get("qrSvg", "") or "").lower())
+            qr_svg = info.get("qrSvg", "") or ""
+            check("二维码 SVG 为深色模块 + 白底（非反色，手机可扫）",
+                  'stroke="#000"' in qr_svg and ('fill="#fff"' in qr_svg or 'fill="#ffffff"' in qr_svg))
 
             # 2) WebSocket 无 token 被拒
             try:
@@ -138,6 +167,41 @@ async def main() -> int:
                 )
                 check("WS tool_result 合并进 tool_use", merged)
                 check("WS 会话状态 active", hello["sessions"][0].get("status") == "active")
+
+                # 分页：无 limit 返回全量 + hasMore=false；带 limit 只回最近 N 条 + hasMore
+                check("WS 无 limit 返回全量且 hasMore=false",
+                      hist.get("hasMore") is False and len(hist.get("records", [])) >= 4)
+                await asyncio.sleep(0.35)   # get-history 有每连接 0.3s 限流
+                await ws.send(json.dumps({"type": "get-history", "sessionId": sid, "limit": 2}))
+                page = json.loads(await ws.recv())
+                page_recs = page.get("records", [])
+                check("WS get-history limit 分页条数", len(page_recs) == 2)
+                check("WS get-history hasMore 标志", page.get("hasMore") is True)
+                oldest_idx = page_recs[0]["idx"]
+                # beforeIdx 向上翻页：返回 idx 严格小于游标的更早记录
+                await asyncio.sleep(0.35)
+                await ws.send(json.dumps({"type": "get-history", "sessionId": sid,
+                                          "beforeIdx": oldest_idx, "limit": 2}))
+                older = json.loads(await ws.recv())
+                older_recs = older.get("records", [])
+                check("WS get-history beforeIdx 翻页返回更早记录",
+                      len(older_recs) > 0 and all(r.get("idx", -1) < oldest_idx for r in older_recs))
+                check("WS get-history beforeIdx 翻页 hasMore",
+                      older.get("hasMore") is False)  # 更早只剩 2 条，无更多
+                # 连接面板设备列表应包含当前 WS 连接
+                devs = json.loads(urllib.request.urlopen(
+                    base + "/api/devices?token=" + token, timeout=3).read())
+                check("HTTP /api/devices 含当前连接",
+                      any(d.get("ip") for d in devs.get("devices", [])))
+                # 手机端命令列表 API
+                try:
+                    urllib.request.urlopen(base + "/api/prompts", timeout=3).read()
+                    check("HTTP /api/prompts 无 token 被拒", False)
+                except urllib.error.HTTPError as e:
+                    check("HTTP /api/prompts 无 token 被拒", e.code == 401)
+                prompts = json.loads(urllib.request.urlopen(
+                    base + "/api/prompts?token=" + token, timeout=3).read())
+                check("HTTP /api/prompts 返回列表", isinstance(prompts.get("prompts"), list))
 
                 # 4) 实时广播：追加新记录后应收到 messages
                 await ws.send(json.dumps({"type": "ping"}))

@@ -28,7 +28,7 @@ class WebSocketClient(
         fun onSessionStart(session: SessionInfo)
         fun onSessionUpdate(session: SessionInfo)
         fun onSessionEnd(sessionId: String)
-        fun onMessages(sessionId: String, isHistory: Boolean, isUpdate: Boolean, messages: List<ViewMessage>)
+        fun onMessages(sessionId: String, isHistory: Boolean, isUpdate: Boolean, messages: List<ViewMessage>, hasMore: Boolean = false)
         fun onInteraction(status: String, sessionId: String, message: String)
         fun onClosing(code: Int, reason: String)
         fun onFailure(t: Throwable)
@@ -60,7 +60,8 @@ class WebSocketClient(
                         val sid = obj.optString("sessionId")
                         val isHistory = obj.optBoolean("isHistory")
                         val isUpdate = obj.optBoolean("update")
-                        listenerRef?.onMessages(sid, isHistory, isUpdate, Protocol.parseMessages(obj))
+                        val hasMore = obj.optBoolean("hasMore")
+                        listenerRef?.onMessages(sid, isHistory, isUpdate, Protocol.parseMessages(obj), hasMore)
                     }
                     "interaction" -> listenerRef?.onInteraction(
                         obj.optString("status"),
@@ -97,8 +98,13 @@ class WebSocketClient(
 
     fun listSessions() = ws?.send(JSONObject().put("type", "list-sessions").toString())
 
-    fun getHistory(sessionId: String) =
-        ws?.send(JSONObject().put("type", "get-history").put("sessionId", sessionId).toString())
+    fun getHistory(sessionId: String, limit: Int? = null, beforeIdx: Int? = null) =
+        ws?.send(JSONObject().apply {
+            put("type", "get-history")
+            put("sessionId", sessionId)
+            limit?.let { put("limit", it) }
+            beforeIdx?.let { put("beforeIdx", it) }
+        }.toString())
 
     fun sendPrompt(prompt: String, sessionId: String?) =
         ws?.send(JSONObject()

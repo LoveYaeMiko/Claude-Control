@@ -47,6 +47,17 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
     private var selectedSessionId: String? = null
     private var historyLoadedFor: String? = null
     private var pendingSessionId: String? = null
+    // 分页状态：向上翻找时按页加载更早记录
+    private var hasMoreOlder = false
+    private var loadingOlder = false
+    private var oldestLoadedIdx: Int? = null
+    private var suppressSelection = false
+
+    companion object {
+        private const val HISTORY_PAGE = 50
+        // 占位项：spinner 首位“请选择会话”，选中它不加载任何历史
+        private val PLACEHOLDER = SessionInfo(id = "", cwd = "", title = "", status = "", model = "")
+    }
 
     private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
         result.contents?.let { applyConfigUri(it) }
@@ -73,6 +84,11 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
 
         recycler.layoutManager = LinearLayoutManager(this)
         recycler.adapter = adapter
+        recycler.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
+                if (dy < 0) maybeLoadOlder()   // 向上翻找时按需加载更早记录
+            }
+        })
 
         val prefs = getSharedPreferences("claudeviewer", MODE_PRIVATE)
         urlInput.setText(prefs.getString("ws_url", "ws://192.168.1.38:9876"))
@@ -88,6 +104,7 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
 
         sessionSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                if (suppressSelection) return
                 loadSession(pos)
             }
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
@@ -147,7 +164,16 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
             this.sessions.addAll(sessions)
             rebuildSpinner()
             maybeSelectPending()
+            reloadCurrentIfNeeded()
         }
+    }
+
+    /** 重连后 historyLoadedFor 被置空：若用户之前已选中某会话，则重新拉取第一页补齐断线间隙。 */
+    private fun reloadCurrentIfNeeded() {
+        val sid = selectedSessionId ?: return
+        if (historyLoadedFor == sid) return
+        val real = sessions.indexOfFirst { it.id == sid }
+        if (real >= 0) loadSession(real + 1)
     }
 
     override fun onSessionStart(session: SessionInfo) {
@@ -174,19 +200,35 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         }
     }
 
-    override fun onMessages(sessionId: String, isHistory: Boolean, isUpdate: Boolean, messages: List<ViewMessage>) {
+    override fun onMessages(sessionId: String, isHistory: Boolean, isUpdate: Boolean, messages: List<ViewMessage>, hasMore: Boolean) {
         runOnUiThread {
-            // 只渲染当前选中会话；历史帧整批替换，update 帧按 idx 替换，其余按 idx 去重追加
+            // 只渲染当前选中会话；历史帧分页（首屏替换 / 上翻插头），update 按 idx 替换，其余按 idx 去重追加
             if (sessionId != selectedSessionId) return@runOnUiThread
             if (isHistory) {
-                adapter.submit(messages, clear = true)
+                // 记录本页最旧 idx，作为向上翻页的 beforeIdx 游标
+                val oldest = messages.mapNotNull { it.idx }.minOrNull()
+                if (oldest != null && (oldestLoadedIdx == null || oldest < oldestLoadedIdx!!)) {
+                    oldestLoadedIdx = oldest
+                }
+                if (loadingOlder) {
+                    loadingOlder = false
+                    hasMoreOlder = hasMore
+                    prependHistory(messages)
+                } else {
+                    hasMoreOlder = hasMore
+                    adapter.submit(messages, clear = true)
+                    updateEmptyState()
+                    if (messages.isNotEmpty()) maybeScrollToBottom(force = true)
+                }
             } else if (isUpdate) {
                 adapter.upsert(messages, isUpdate = true)
             } else {
                 adapter.upsert(messages, isUpdate = false)
             }
-            updateEmptyState()
-            if (messages.isNotEmpty()) maybeScrollToBottom(force = isHistory)
+            if (!isHistory) {
+                updateEmptyState()
+                if (messages.isNotEmpty()) maybeScrollToBottom(force = false)
+            }
         }
     }
 
@@ -231,24 +273,59 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
 
     private fun rebuildSpinner() {
         val current = selectedSessionId
-        sessionSpinner.adapter = SessionAdapter(sessions.toList())
-        val pos = sessions.indexOfFirst { it.id == current }.takeIf { it >= 0 } ?: 0
-        if (sessions.isNotEmpty()) {
-            sessionSpinner.setSelection(pos)
-            loadSession(pos)   // 初始自动选中不触发 onItemSelected，需显式加载
-        }
+        // 首位是占位项“选择要查看的会话”，真实会话从位置 1 开始
+        suppressSelection = true   // setAdapter/setSelection 都会触发 onItemSelected，一并抑制
+        sessionSpinner.adapter = SessionAdapter(listOf(PLACEHOLDER) + sessions)
+        val real = sessions.indexOfFirst { it.id == current }
+        val pos = if (real >= 0) real + 1 else 0
+        sessionSpinner.setSelection(pos)
+        suppressSelection = false
+        // 惰性加载：连接后不自动拉历史，等用户选中会话再现场加载
     }
 
+    /** 惰性加载：用户选中某会话时只拉最近一页；更早记录靠向上翻页加载。 */
     private fun loadSession(pos: Int) {
-        if (pos !in sessions.indices) return
-        val s = sessions[pos]
+        val real = pos - 1   // 去掉占位项
+        if (real !in sessions.indices) {
+            // 选中占位项：清空，不加载
+            selectedSessionId = null
+            historyLoadedFor = null
+            oldestLoadedIdx = null
+            hasMoreOlder = false
+            loadingOlder = false
+            adapter.submit(emptyList(), clear = true)
+            updateEmptyState()
+            return
+        }
+        val s = sessions[real]
         if (s.id != historyLoadedFor) {
             selectedSessionId = s.id
             historyLoadedFor = s.id
+            oldestLoadedIdx = null
+            hasMoreOlder = false
+            loadingOlder = false
             adapter.submit(emptyList(), clear = true)
             updateEmptyState()
-            ws?.getHistory(s.id)
+            ws?.getHistory(s.id, limit = HISTORY_PAGE)
         }
+    }
+
+    /** 向上翻页：滚动到顶部且还有更早记录时，按页加载。 */
+    private fun maybeLoadOlder() {
+        if (!hasMoreOlder || loadingOlder || selectedSessionId == null) return
+        if (recycler.canScrollVertically(-1)) return   // 尚未到顶
+        loadingOlder = true
+        ws?.getHistory(selectedSessionId!!, limit = HISTORY_PAGE, beforeIdx = oldestLoadedIdx)
+    }
+
+    /** 把更早的一页插到列表头部，并保持当前阅读位置不跳动。 */
+    private fun prependHistory(messages: List<ViewMessage>) {
+        val lm = recycler.layoutManager as? LinearLayoutManager ?: return
+        val firstPos = lm.findFirstVisibleItemPosition()
+        val offsetTop = lm.findViewByPosition(firstPos)?.top ?: 0
+        val added = adapter.prepend(messages)
+        if (added > 0) lm.scrollToPositionWithOffset(firstPos + added, offsetTop)
+        updateEmptyState()
     }
 
     /** 仅当接近底部（或强制）时滚动到底，避免用户上翻阅读时被新消息打断。 */
@@ -325,7 +402,7 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         val pos = sessions.indexOfFirst { it.id == sessionId }
         if (pos >= 0) {
             pendingSessionId = null
-            if (selectedSessionId != sessionId) sessionSpinner.setSelection(pos)
+            if (selectedSessionId != sessionId) sessionSpinner.setSelection(pos + 1)
         } else {
             pendingSessionId = sessionId
             ws?.listSessions()
@@ -337,7 +414,7 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         val pos = sessions.indexOfFirst { it.id == pid }
         if (pos >= 0 && selectedSessionId != pid) {
             pendingSessionId = null
-            sessionSpinner.setSelection(pos)
+            sessionSpinner.setSelection(pos + 1)
         }
     }
 
@@ -356,17 +433,26 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
 
         private fun bind(v: View, position: Int): View {
             val s = getItem(position) ?: return v
-            val color = ContextCompat.getColor(context, statusColorRes(s.status))
+            val isPlaceholder = s.id.isBlank()
+            val colorRes = if (isPlaceholder) R.color.status_idle else statusColorRes(s.status)
+            val color = ContextCompat.getColor(context, colorRes)
             v.findViewById<View>(R.id.session_dot).backgroundTintList = ColorStateList.valueOf(color)
-            v.findViewById<TextView>(R.id.session_title).text =
-                if (s.title.isNotBlank()) s.title else getString(R.string.unnamed_session)
+            v.findViewById<TextView>(R.id.session_title).text = when {
+                isPlaceholder -> getString(R.string.select_session_hint)
+                s.title.isNotBlank() -> s.title
+                else -> getString(R.string.unnamed_session)
+            }
             val sub = v.findViewById<TextView>(R.id.session_subtitle)
-            val secondary = s.cwd.ifBlank { s.model }
-            if (secondary.isNotBlank()) {
-                sub.text = secondary
-                sub.visibility = View.VISIBLE
-            } else {
+            if (isPlaceholder) {
                 sub.visibility = View.GONE
+            } else {
+                val secondary = s.cwd.ifBlank { s.model }
+                if (secondary.isNotBlank()) {
+                    sub.text = secondary
+                    sub.visibility = View.VISIBLE
+                } else {
+                    sub.visibility = View.GONE
+                }
             }
             return v
         }
