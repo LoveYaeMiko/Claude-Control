@@ -1,0 +1,4 @@
+# 行尾规范化：Windows 批处理文件要求 CRLF（cmd.exe 会把 LF 脚本切碎误执行），shell 脚本要求 LF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.sh  text eol=lf

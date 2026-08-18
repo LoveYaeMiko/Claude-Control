@@ -1728,8 +1728,21 @@ async def main() -> None:
     # 默认 20s ping/20s 超时在 cloudflared/ngrok 隧道下会因 ping/pong 被丢弃或延迟
     # 而误判为“keepalive ping timeout (1011)”强制断连（手机端“加载会话超时后断连”的根因）。
     # 存活探测交给客户端（安卓 OkHttp pingInterval=20s 自带 ping，服务端仍自动回 pong）。
-    async with ws_serve(ws_server.handle, host, cfg.port, process_request=process_request,
-                        ping_interval=None, ping_timeout=None, max_size=64 * 2**20):
+    try:
+        server = await ws_serve(ws_server.handle, host, cfg.port, process_request=process_request,
+                                ping_interval=None, ping_timeout=None, max_size=64 * 2**20)
+    except OSError as exc:
+        # 端口被占用等绑定失败：给可读提示（而非裸 traceback），避免双击 start.bat 时窗口闪退
+        if getattr(exc, "errno", None) in (10048, 48, 98):  # Win/Linux/macOS 的“地址已使用”
+            msg = (f"端口 {cfg.port} 已被占用：可能已有另一个 Claude-Control 中继在运行。\n"
+                   f"请先关闭已运行的中继，或用 --port <端口号> 换一个端口。")
+        else:
+            msg = f"无法绑定端口 {cfg.port}：{exc}"
+        log.error("%s", msg)
+        print(f"\n[错误] {msg}\n", file=sys.stderr)
+        sys.exit(1)
+
+    async with server:
         await tunnels.start()
         # 后台任务：等隧道地址稳定后生成二维码 PNG 并发送邮件通知
         asyncio.create_task(_publish_config(cfg, tunnels, cfg.port))
