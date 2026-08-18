@@ -376,6 +376,35 @@ async def test_interact() -> None:
         check("_content_to_blocks document 分支",
               bool(cb2) and cb2[0].get("type") == "document" and cb2[0].get("name") == "a.pdf")
 
+        # 多模态可读性：document 块带 title（文件名）；图片 8 MiB 内进历史、超限降级
+        doc_line = relay_server._user_message_line(
+            "读文档", [{"type": "document", "mediaType": "application/pdf",
+                        "data": "QUJD", "name": "报告.pdf"}])
+        doc_obj = json.loads(doc_line)
+        doc_blk = next(b for b in doc_obj["message"]["content"] if b.get("type") == "document")
+        check("_user_message_line document 块带 title（文件名）",
+              doc_blk.get("title") == "报告.pdf")
+
+        cb_img = relay_server._content_to_blocks(
+            [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                          "data": "A" * 2_800_000}}])
+        check("_content_to_blocks 8MiB 内图片进历史（约 2MiB）",
+              bool(cb_img) and cb_img[0].get("type") == "image")
+
+        cb_img_big = relay_server._content_to_blocks(
+            [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                          "data": "A" * 12_000_000}}])
+        check("_content_to_blocks 超 8MiB 图片降级为占位文本",
+              bool(cb_img_big) and cb_img_big[0].get("type") == "text"
+              and "图片过大" in cb_img_big[0].get("text", ""))
+
+        cb_doc_big = relay_server._content_to_blocks(
+            [{"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                             "data": "A" * 12_000_000}, "name": "big.pdf"}])
+        check("_content_to_blocks 超 8MiB 文档降级为占位文本",
+              bool(cb_doc_big) and cb_doc_big[0].get("type") == "text"
+              and "文档过大" in cb_doc_big[0].get("text", ""))
+
         good, err = relay_server._validate_attachments(
             [{"type": "image", "mediaType": "image/png", "data": "QUJD"}], 20 * 1024 * 1024)
         check("_validate_attachments 合法图片", err == "" and len(good) == 1)
@@ -435,6 +464,12 @@ async def test_interact() -> None:
         env["CC_INTERACT_TURN_TIMEOUT"] = "30"
         env["CC_INTERACT_MAX_UPLOAD_MB"] = "1"   # 缩小上限，便于测「超大附件」路径
         env["CC_QR_PNG_PATH"] = str(root / "qr_interact.png")
+        # 新建会话默认 cwd（脱离项目目录）——指向临时目录便于断言；fake_claude 启动时回写 os.getcwd()
+        default_cwd_dir = root / "default_cwd"
+        default_cwd_dir.mkdir()
+        cwd_marker = root / "cwd.txt"
+        env["CC_DEFAULT_CWD"] = str(default_cwd_dir)
+        env["CC_FAKE_CWD_MARKER"] = str(cwd_marker)
 
         proc = await asyncio.create_subprocess_exec(
             sys.executable, "relay_server.py",
@@ -483,6 +518,9 @@ async def test_interact() -> None:
                       bool(fin and fin.get("exitCode") == 0))
             check("fake_claude 收到 allow 标记",
                   "allow" in (marker.read_text(encoding="utf-8") if marker.exists() else ""))
+            check("新建交互子进程 cwd = CC_DEFAULT_CWD",
+                  cwd_marker.exists()
+                  and cwd_marker.read_text(encoding="utf-8").strip().lower() == str(default_cwd_dir).lower())
 
             # ---- 场景 B：deny ----
             marker.write_text("", encoding="utf-8")
@@ -531,6 +569,48 @@ async def test_interact() -> None:
                                         and m.get("status") == "error"
                                         and m.get("code") == "attachment")
                 check("超大附件回 interaction error(code=attachment)", err is not None)
+
+            # ---- 场景 F：--resume 会话 cwd = 会话原始 cwd（脱离项目目录） ----
+            sid3 = mock_transcript.make_mock_project(root)
+            f3 = root / "c--Users-wyxwi-Desktop-Claude-Control" / f"{sid3}.jsonl"
+            await asyncio.sleep(2.5)   # 等中继发现并读取该会话（cwd 来自 JSONL 顶层字段）
+            old = time.time() - 300
+            os.utime(f3, (old, old))   # 把 mtime 调旧让会话进入 idle（非 active/attention）
+            async with ws_connect(f"ws://127.0.0.1:{port}/ws?token={token}") as ws:
+                await ws.recv()   # hello
+                idle_confirmed = False
+                end = time.time() + 8
+                while time.time() < end:
+                    await ws.send(json.dumps({"type": "list-sessions"}))
+                    frame = await _recv_until(ws, lambda m: m.get("type") == "sessions")
+                    s3 = next((s for s in (frame or {}).get("sessions", []) if s.get("id") == sid3), None)
+                    if s3 and s3.get("status") == "idle":
+                        idle_confirmed = True
+                        break
+                    await asyncio.sleep(0.5)
+                check("resume 目标会话进入 idle", idle_confirmed)
+                # 清掉前几轮 fake_claude 写下的 cwd 标记，确保下面读到的来自本次 resume 子进程
+                if cwd_marker.exists():
+                    cwd_marker.unlink()
+                await ws.send(json.dumps({"type": "send-prompt", "prompt": "恢复会话", "sessionId": sid3}))
+                started = await _recv_until(ws, lambda m: m.get("type") == "interaction"
+                                            and m.get("status") == "started")
+                check("resume 会话回 started", started is not None)
+                resume_cwd = ""
+                end = time.time() + 6
+                while time.time() < end:
+                    if cwd_marker.exists():
+                        resume_cwd = cwd_marker.read_text(encoding="utf-8").strip()
+                        if resume_cwd:
+                            break
+                    await asyncio.sleep(0.2)
+                check("resume 子进程 cwd = 会话原始 cwd",
+                      resume_cwd.lower() == mock_transcript.CWD.lower())
+                # 优雅结束：允许审批（fake_claude 会吐 control_request）
+                perm = await _recv_until(ws, lambda m: m.get("type") == "permission-request")
+                if perm:
+                    await ws.send(json.dumps({"type": "permission-response",
+                                              "requestId": perm["requestId"], "behavior": "allow"}))
         finally:
             proc.terminate()
             try:

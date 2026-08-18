@@ -54,7 +54,8 @@
 
     <!-- 新建会话 / 主题 -->
     <string name="new_session">新建会话</string>
-    <string name="new_session_hint">✨ 已新建会话 · 下次发送将开启新会话</string>
+    <string name="new_session_hint">✨ 新会话</string>
+    <string name="cancel_new_session">取消</string>
     <string name="theme_switch">主题</string>
     <string name="theme_system">跟随系统</string>
     <string name="theme_light">浅色</string>
@@ -68,6 +69,9 @@
     <string name="attachment_read_failed">读取附件失败</string>
     <string name="attachment_max">最多 5 个附件</string>
     <string name="document_label">📄 文档</string>
+
+    <!-- 前台服务通知 -->
+    <string name="notification_channel">后台连接</string>
 
     <!-- 权限审批 -->
     <string name="permission_title">Claude 请求执行 %1$s</string>

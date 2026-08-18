@@ -131,7 +131,8 @@ class WebSocketClient(
                     put(JSONObject()
                         .put("type", a.type)
                         .put("mediaType", a.mediaType)
-                        .put("data", a.data))
+                        .put("data", a.data)
+                        .put("name", a.name))
                 }
             })
             .toString())

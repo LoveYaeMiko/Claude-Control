@@ -8,6 +8,7 @@
 行为由环境变量驱动（继承自中继服务进程）：
 - CC_FAKE_SESSION_ID   : system/init 上报的 session_id（默认随机 UUID）
 - CC_FAKE_MARKER       : 追加写入行为标记的文件路径（每行 allow / deny）
+- CC_FAKE_CWD_MARKER   : 覆盖写入本进程工作目录（os.getcwd()）的文件路径，用于断言 cwd
 - CC_FAKE_NO_PERMISSION: 置 1 则不吐 control_request（init → result 直通）
 """
 # -*- coding: utf-8 -*-
@@ -31,7 +32,15 @@ def _emit(obj):
 def main() -> int:
     session_id = os.environ.get("CC_FAKE_SESSION_ID", "").strip() or str(uuid4())
     marker = os.environ.get("CC_FAKE_MARKER", "").strip()
+    cwd_marker = os.environ.get("CC_FAKE_CWD_MARKER", "").strip()
     no_perm = os.environ.get("CC_FAKE_NO_PERMISSION", "").lower() in ("1", "true", "yes")
+
+    if cwd_marker:
+        try:
+            with open(cwd_marker, "w", encoding="utf-8") as fh:
+                fh.write(os.getcwd())
+        except Exception:
+            pass
 
     def mark(behavior):
         if marker:

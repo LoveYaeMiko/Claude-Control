@@ -47,6 +47,18 @@
     <color name="avatar_system_fg">#1A1D24</color>
     <color name="document_bg">#F0F2F5</color>
 
+    <!-- Material3 补充角色：错误容器 / 三级色 / 反色 / 轮廓变体 -->
+    <color name="error_container">#FDE0E0</color>
+    <color name="on_error_container">#7A1F1F</color>
+    <color name="tertiary">#7A5DB8</color>
+    <color name="on_tertiary">#FFFFFF</color>
+    <color name="tertiary_container">#EADDFF</color>
+    <color name="on_tertiary_container">#2A1644</color>
+    <color name="inverse_surface">#2A303C</color>
+    <color name="inverse_on_surface">#F0F3F8</color>
+    <color name="inverse_primary">#A8C7FF</color>
+    <color name="outline_variant">#D7DEE7</color>
+
     <!-- 图标 / 启动器 -->
     <color name="ic_launcher_background">#F7F8FA</color>
     <color name="black">#FF000000</color>

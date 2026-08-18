@@ -5,8 +5,9 @@
 <title>Claude-Control 连接面板</title>
 <style>
   :root {
+    color-scheme: dark;
     --bg: #0e1117; --surface: #161b22; --border: #30363d;
-    --text: #dbe4f0; --muted: #8b98ab; --accent: #58a6ff;
+    --text: #dbe4f0; --muted: #8b98ab; --accent: #4f9cf9;
     --ok: #3fb950; --err: #f85149;
   }
   * { box-sizing: border-box; }
@@ -23,9 +24,9 @@
   .label { color: var(--muted); font-size: 12px; min-width: 72px; }
   .mono { font-family: ui-monospace, Consolas, monospace; font-size: 13px; word-break: break-all; }
   .val { flex: 1; min-width: 0; }
-  button.copy { background: #21262d; border: 1px solid var(--border); color: var(--text);
+  button.copy { background: var(--surface); border: 1px solid var(--border); color: var(--text);
                 border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
-  button.copy:hover { background: #30363d; }
+  button.copy:hover { background: var(--border); }
   .qr { display: flex; justify-content: center; padding: 8px 0; }
   .qr svg { max-width: 240px; height: auto; }
   .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; }
@@ -43,7 +44,7 @@
   .prompt .txt { font-size: 13px; word-break: break-all; white-space: pre-wrap; }
   .prompt .meta { color: var(--muted); font-size: 12px; }
   .st { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; }
-  input.token { width: 100%; background: #0d1117; border: 1px solid var(--border);
+  input.token { width: 100%; background: var(--bg); border: 1px solid var(--border);
                 border-radius: 6px; color: var(--text); padding: 8px 10px; font-family: monospace; }
   .err { color: var(--err); font-size: 13px; }
   a { color: var(--accent); text-decoration: none; }

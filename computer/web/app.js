@@ -217,8 +217,35 @@ function buildBlock(blk) {
       wrap.appendChild(el('span', 'tag', blk.text));
       return wrap;
     }
+    case 'image': {
+      const wrap = el('div', 'blk');
+      const img = document.createElement('img');
+      img.className = 'blk-image';
+      img.alt = '图片';
+      img.loading = 'lazy';
+      if (blk.data) img.src = `data:${blk.mediaType || 'image/png'};base64,${blk.data}`;
+      wrap.appendChild(img);
+      return wrap;
+    }
+    case 'document': {
+      const wrap = el('div', 'blk');
+      const name = blk.name || '文档';
+      const a = document.createElement('a');
+      a.className = 'blk-document';
+      a.target = '_blank';
+      a.rel = 'noopener';
+      if (blk.data) {
+        a.href = `data:${blk.mediaType || 'application/pdf'};base64,${blk.data}`;
+        a.download = name;
+      }
+      const nameSpan = el('span', 'doc-name', '📄 ' + name);
+      const typeSpan = el('span', 'doc-type', (blk.mediaType || '').split('/').pop() || '');
+      a.append(nameSpan, typeSpan);
+      wrap.appendChild(a);
+      return wrap;
+    }
     default:
-      return el('div', 'blk', JSON.stringify(blk));
+      return el('div', 'blk blk-text', JSON.stringify(blk));
   }
 }
 

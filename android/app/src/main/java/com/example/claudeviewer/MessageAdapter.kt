@@ -1,5 +1,6 @@
 package com.example.claudeviewer
 
+import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.text.SpannableString
@@ -14,9 +15,11 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.recyclerview.widget.RecyclerView
 import coil.load
 import com.google.android.material.card.MaterialCardView
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -147,7 +150,7 @@ class MessageAdapter : RecyclerView.Adapter<MessageAdapter.VH>() {
                         body.addView(makeText(summary, isMono = true, dim = true, isError = b.isError))
                     }
                     "image" -> if (b.data.isNotBlank()) body.addView(makeImage(b.data))
-                    "document" -> body.addView(makeDocument(b.name))
+                    "document" -> body.addView(makeDocument(b.name, b.mediaType, b.data))
                 }
                 blockIndex++
             }
@@ -249,14 +252,36 @@ class MessageAdapter : RecyclerView.Adapter<MessageAdapter.VH>() {
             return iv
         }
 
-        private fun makeDocument(name: String): TextView {
+        private fun makeDocument(name: String, mediaType: String, data: String): TextView {
             val tv = TextView(ctx)
             tv.text = "${ctx.getString(R.string.document_label)} ${name.ifBlank { "PDF" }}"
             tv.setTextColor(ContextCompat.getColor(ctx, R.color.msg_text_primary))
             tv.textSize = 13f
             tv.setBackgroundResource(R.drawable.document_chip_bg)
             tv.setPadding(dp(12), dp(8), dp(12), dp(8))
+            if (data.isNotBlank()) {
+                tv.setOnClickListener { openDocument(name, mediaType, data) }
+            }
             return tv
+        }
+
+        /** 把内嵌 base64 文档写到缓存文件并用系统查看器打开（需 FileProvider 授权）。 */
+        private fun openDocument(name: String, mediaType: String, data: String) {
+            val bytes = try { Base64.decode(data, Base64.NO_WRAP) } catch (_: Exception) { null }
+                ?: return
+            try {
+                val dir = File(ctx.cacheDir, "docs").apply { mkdirs() }
+                val file = File(dir, name.ifBlank { "document" })
+                file.writeBytes(bytes)
+                val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", file)
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, mediaType.ifBlank { "application/pdf" })
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                ctx.startActivity(intent)
+            } catch (_: Exception) {
+                // 无可用查看器时静默失败
+            }
         }
 
         private fun makeCollapsible(label: String, content: String, dim: Boolean, key: String): TextView {

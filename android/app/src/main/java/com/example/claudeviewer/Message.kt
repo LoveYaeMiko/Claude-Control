@@ -22,6 +22,7 @@ data class Attachment(
     val type: String,          // "image" | "document"
     val mediaType: String,
     val data: String,
+    val name: String = "",     // 文件名（PDF 等，随上传一并发送）
 )
 
 data class SessionInfo(

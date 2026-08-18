@@ -12,10 +12,19 @@
         <item name="colorOnSecondaryContainer">@color/on_primary_container</item>
         <item name="colorSurface">@color/surface</item>
         <item name="colorOnSurface">@color/on_surface</item>
+        <item name="colorOnBackground">@color/on_surface</item>
         <item name="colorSurfaceVariant">@color/surface_variant</item>
         <item name="colorOnSurfaceVariant">@color/on_surface_variant</item>
         <item name="colorOutline">@color/outline</item>
-        <item name="colorOutlineVariant">@color/outline</item>
+        <item name="colorOutlineVariant">@color/outline_variant</item>
+        <item name="colorTertiary">@color/tertiary</item>
+        <item name="colorOnTertiary">@color/on_tertiary</item>
+        <item name="colorTertiaryContainer">@color/tertiary_container</item>
+        <item name="colorOnTertiaryContainer">@color/on_tertiary_container</item>
+        <!-- Material 1.12.0 的 inverse 角色命名为 color*Inverse（非 colorInverse*） -->
+        <item name="colorSurfaceInverse">@color/inverse_surface</item>
+        <item name="colorOnSurfaceInverse">@color/inverse_on_surface</item>
+        <item name="colorPrimaryInverse">@color/inverse_primary</item>
         <!-- Material3 表面容器角色：对话框/下拉/文本域等组件默认使用这些角色，
              显式映射到主题调色板，避免深色模式下仍使用 Material3 默认浅灰容器 -->
         <item name="colorSurfaceContainerLowest">@color/background</item>
@@ -27,6 +36,8 @@
         <item name="colorSurfaceDim">@color/surface_variant</item>
         <item name="colorError">@color/error</item>
         <item name="colorOnError">@color/on_primary</item>
+        <item name="colorErrorContainer">@color/error_container</item>
+        <item name="colorOnErrorContainer">@color/on_error_container</item>
         <item name="android:colorBackground">@color/background</item>
         <item name="android:windowBackground">@color/background</item>
         <item name="android:statusBarColor">@color/background</item>

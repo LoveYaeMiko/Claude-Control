@@ -1,8 +1,11 @@
 package com.example.claudeviewer
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.util.Base64
@@ -56,14 +59,18 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
     private lateinit var sendBtn: MaterialButton
     private lateinit var attachBtn: ImageButton
     private lateinit var attachmentBar: LinearLayout
-    private lateinit var newSessionBanner: TextView
+    private lateinit var newSessionBanner: LinearLayout
 
     private val adapter = MessageAdapter()
-    private var ws: WebSocketClient? = null
+    // 连接由前台服务 RelayService 持有；这里只读其当前 client 以便发帧。
+    private val ws: WebSocketClient? get() = RelayService.client
     private val sessions = mutableListOf<SessionInfo>()
     private var selectedSessionId: String? = null
     private var historyLoadedFor: String? = null
     private var pendingSessionId: String? = null
+    // 新建会话：进入「客户端空白占位」模式，可取消；记住进入前会话以便取消时恢复
+    private var newSessionMode = false
+    private var preNewSessionId: String? = null
     // 分页状态：向上翻找时按页加载更早记录
     private var hasMoreOlder = false
     private var loadingOlder = false
@@ -101,6 +108,9 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         onAttachmentsPicked(uris)
     }
 
+    // Android 13+ 前台服务常驻通知需要运行时授权；授权与否不影响服务启动，仅影响通知展示。
+    private val notificationPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+
     override fun onCreate(savedInstanceState: Bundle?) {
         val prefs = getSharedPreferences("claudeviewer", MODE_PRIVATE)
         applyThemeMode(prefs.getString("theme", "system") ?: "system")
@@ -127,6 +137,7 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         attachBtn = findViewById(R.id.attach_btn)
         attachmentBar = findViewById(R.id.attachment_bar)
         newSessionBanner = findViewById(R.id.new_session_banner)
+        findViewById<TextView>(R.id.new_session_cancel).setOnClickListener { cancelNewSession() }
 
         recycler.layoutManager = LinearLayoutManager(this)
         recycler.adapter = adapter
@@ -169,11 +180,13 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
 
     override fun onResume() {
         super.onResume()
+        RelayService.uiListener = this   // 进程重建/主题切换后把回调重新指向当前 Activity
         autoConnectIfNeeded()
     }
 
     override fun onDestroy() {
-        ws?.close()
+        // 前台服务继续持有连接（后台保活），这里只解绑 UI 回调，不再关闭 socket
+        if (RelayService.uiListener === this) RelayService.uiListener = null
         super.onDestroy()
     }
 
@@ -191,8 +204,10 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         }
     }
 
-    /** 清空当前会话选择，下一条 prompt 将开新会话（无 --resume）。 */
+    /** 进入「新会话」空白占位模式：记住进入前会话，清空选择，下一条 prompt 开新会话；可经 banner「取消」退出。 */
     private fun newSession() {
+        preNewSessionId = selectedSessionId
+        newSessionMode = true
         selectedSessionId = null
         historyLoadedFor = null
         oldestLoadedIdx = null
@@ -207,6 +222,29 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         newSessionBanner.visibility = View.VISIBLE
         newSessionBanner.alpha = 0f
         newSessionBanner.animate().alpha(1f).setDuration(180).start()
+    }
+
+    /** 取消新建：恢复到进入前选中的会话（若有），否则保持空白。 */
+    private fun cancelNewSession() {
+        if (!newSessionMode) return
+        newSessionMode = false
+        newSessionBanner.visibility = View.GONE
+        val prev = preNewSessionId
+        preNewSessionId = null
+        if (prev != null) {
+            val pos = sessions.indexOfFirst { it.id == prev }
+            if (pos >= 0) {
+                sessionSpinner.setSelection(pos + 1)   // 触发 onItemSelected -> loadSession 恢复历史
+                return
+            }
+        }
+        selectedSessionId = null
+        historyLoadedFor = null
+        oldestLoadedIdx = null
+        hasMoreOlder = false
+        loadingOlder = false
+        adapter.submit(emptyList(), clear = true)
+        updateEmptyState()
     }
 
     private fun applyThemeMode(mode: String) {
@@ -253,6 +291,7 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
                     withContext(Dispatchers.Main) { toast(getString(R.string.attachment_unsupported)) }
                     continue
                 }
+                val name = queryDisplayName(uri) ?: ""
                 val bytes = try { readLimited(uri, MAX_ATTACHMENT_BYTES) } catch (_: Exception) { null }
                 if (bytes == null) {
                     withContext(Dispatchers.Main) { toast(getString(R.string.attachment_read_failed)) }
@@ -263,7 +302,7 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
                     continue
                 }
                 val type = if (mime.startsWith("image/")) "image" else "document"
-                added.add(Attachment(type, mime, Base64.encodeToString(bytes, Base64.NO_WRAP)))
+                added.add(Attachment(type, mime, Base64.encodeToString(bytes, Base64.NO_WRAP), name))
             }
             withContext(Dispatchers.Main) {
                 pendingAttachments.addAll(added)
@@ -291,12 +330,22 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         }
     }
 
+    /** 从 URI 元数据取文件名（OpenableColumns.DISPLAY_NAME），失败返回 null。 */
+    private fun queryDisplayName(uri: Uri): String? = try {
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) c.getString(0) else null
+        }
+    } catch (_: Exception) {
+        null
+    }
+
     private fun renderAttachmentBar() {
         attachmentBar.removeAllViews()
         attachmentBar.visibility = if (pendingAttachments.isEmpty()) View.GONE else View.VISIBLE
         for ((i, att) in pendingAttachments.withIndex()) {
             val chip = TextView(this)
-            chip.text = (if (att.type == "image") "🖼️ " else "📄 ") + att.mediaType + "  ✕"
+            val label = att.name.ifBlank { att.mediaType }
+            chip.text = (if (att.type == "image") "🖼️ " else "📄 ") + label + "  ✕"
             chip.setTextColor(ContextCompat.getColor(this, R.color.msg_text_primary))
             chip.setBackgroundResource(R.drawable.document_chip_bg)
             chip.setPadding(dp(10), dp(6), dp(10), dp(6))
@@ -317,14 +366,15 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
     private fun toggleConnection() {
-        if (ws != null) {
-            ws?.close()
-            ws = null
+        if (ws != null || RelayService.shouldReconnect) {
+            RelayService.disconnect()
+            stopService(Intent(this, RelayService::class.java))
             getSharedPreferences("claudeviewer", MODE_PRIVATE).edit()
                 .putBoolean("connected", false).apply()
             connectBtn.text = getString(R.string.connect)
             setStatus(R.string.status_disconnected, R.color.status_idle)
             configPanel.visibility = View.VISIBLE
+            inputBar.visibility = View.GONE
             return
         }
         val url = urlInput.text.toString().trim().trimEnd('/')
@@ -338,22 +388,30 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         doConnect(url, token)
     }
 
-    /** 建立 WebSocket 连接（首次连接与自动重连共用）。 */
+    /** 建立 WebSocket 连接（首次连接与自动重连共用）：配置服务并以前台服务方式启动。 */
     private fun doConnect(url: String, token: String) {
         setStatus(R.string.status_connecting, R.color.status_connecting)
         connectBtn.isEnabled = false
         configPanel.visibility = View.GONE
-        ws = WebSocketClient(url, token)
-        ws?.connect(this)
+        RelayService.configure(url, token, this)
+        requestNotificationPermissionIfNeeded()
+        ContextCompat.startForegroundService(this, Intent(this, RelayService::class.java))
     }
 
-    /** 从后台返回 / 主题切换重建后，若之前处于已连接状态则自动重连（避免文件选择器导致断连）。 */
+    /** 从后台返回 / 主题切换重建后，若之前处于已连接状态但连接已丢则自动重连。 */
     private fun autoConnectIfNeeded() {
-        if (ws != null) return
+        if (RelayService.client != null) return
         if (!getSharedPreferences("claudeviewer", MODE_PRIVATE).getBoolean("connected", false)) return
         val url = urlInput.text.toString().trim().trimEnd('/')
         if (url.isEmpty()) return
         doConnect(url, tokenInput.text.toString().trim())
+    }
+
+    /** Android 13+ 前台服务常驻通知需运行时授权；未授权仅影响通知展示，不阻断服务启动。 */
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < 33) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
+        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
     override fun onOpen() {
@@ -443,25 +501,18 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
 
     override fun onClosing(code: Int, reason: String) {
         runOnUiThread {
-            if (ws != null) {
-                ws = null
-                connectBtn.text = getString(R.string.connect)
-                connectBtn.isEnabled = true
-                setStatus(R.string.status_disconnected, R.color.status_idle)
-                configPanel.visibility = View.VISIBLE
-                inputBar.visibility = View.GONE
-            }
+            // 前台服务会自动重连；这里只提示「连接中」，保持「断开」按钮可用
+            connectBtn.text = getString(R.string.disconnect)
+            connectBtn.isEnabled = true
+            setStatus(R.string.status_connecting, R.color.status_connecting)
         }
     }
 
     override fun onFailure(t: Throwable) {
         runOnUiThread {
-            ws = null
-            connectBtn.text = getString(R.string.connect)
+            connectBtn.text = getString(R.string.disconnect)
             connectBtn.isEnabled = true
-            setStatus(R.string.status_failed, R.color.status_failed)
-            configPanel.visibility = View.VISIBLE
-            inputBar.visibility = View.GONE
+            setStatus(R.string.status_connecting, R.color.status_connecting)
             toast(getString(R.string.connect_failed, t.message ?: ""))
         }
     }
@@ -470,13 +521,31 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         runOnUiThread {
             when (status) {
                 "started" -> toast(getString(R.string.prompt_sent))
-                "session" -> selectOrWait(sessionId)
+                "session" -> onInteractionSession(sessionId)
                 "finished" -> {
-                    selectOrWait(sessionId)
+                    onInteractionSession(sessionId)
                     toast(getString(R.string.interact_done))
                 }
                 "error" -> toast(getString(R.string.interact_error, message))
             }
+        }
+    }
+
+    /** 交互回显到具体会话：仅在「新建中」或尚未选中会话时才切焦点；正在看其它会话时不打断（后台会话完成仅刷新列表状态）。 */
+    private fun onInteractionSession(sessionId: String) {
+        if (sessionId.isBlank()) return
+        if (!newSessionMode && selectedSessionId != null) return
+        newSessionMode = false
+        preNewSessionId = null
+        newSessionBanner.visibility = View.GONE
+        // 直接选中新会话，不再依赖 listSessions 回环（修复 latch：回显丢失会导致每次命令都开新会话）
+        val pos = sessions.indexOfFirst { it.id == sessionId }
+        if (pos >= 0) {
+            pendingSessionId = null
+            sessionSpinner.setSelection(pos + 1)
+        } else {
+            pendingSessionId = sessionId
+            ws?.listSessions()
         }
     }
 
@@ -653,24 +722,14 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         val w = ws ?: run { toast(getString(R.string.not_connected)); return }
         val text = promptInput.text.toString().trim()
         if (text.isEmpty() && pendingAttachments.isEmpty()) return
-        w.sendPrompt(text, selectedSessionId, pendingAttachments.toList())
+        // 新建模式下传空 sessionId，由服务端开新会话；否则 --resume 当前会话
+        val sid = if (newSessionMode) "" else selectedSessionId
+        w.sendPrompt(text, sid, pendingAttachments.toList())
         promptInput.setText("")
         pendingAttachments.clear()
         renderAttachmentBar()
-        newSessionBanner.visibility = View.GONE
+        // banner 由 onInteractionSession 或 cancelNewSession 收起（新建会话被回显确认后才退出新模式）
         toast(getString(R.string.prompt_sent))
-    }
-
-    private fun selectOrWait(sessionId: String) {
-        if (sessionId.isBlank()) return
-        val pos = sessions.indexOfFirst { it.id == sessionId }
-        if (pos >= 0) {
-            pendingSessionId = null
-            if (selectedSessionId != sessionId) sessionSpinner.setSelection(pos + 1)
-        } else {
-            pendingSessionId = sessionId
-            ws?.listSessions()
-        }
     }
 
     private fun maybeSelectPending() {

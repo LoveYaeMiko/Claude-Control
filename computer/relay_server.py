@@ -50,7 +50,7 @@ from urllib.parse import quote, unquote
 # ---------------------------------------------------------------------------
 
 APP_NAME = "Claude-Control"
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 DEFAULT_PORT = 9876
 SCAN_INTERVAL = 1.0          # transcript 轮询间隔（秒）
 IDLE_TIMEOUT = 120           # 会话超过 N 秒无写入视为“结束”（供状态展示）
@@ -61,7 +61,7 @@ THINKING_LIMIT = 4000        # 单个 thinking 块下发的最大字符数（截
 TEXT_LIMIT = 16000           # 单个 text 块下发的最大字符数（截断超长正文，控制 get-history 体积）
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024   # 单个附件解码后最大字节数（CC_INTERACT_MAX_UPLOAD_MB 可调）
 MAX_ATTACHMENTS = 5                   # 单条 send-prompt 允许的最大附件数
-MAX_ATTACHMENT_HISTORY_BYTES = 1 * 1024 * 1024  # 历史回放中内嵌图片 base64 的解码上限
+MAX_ATTACHMENT_HISTORY_BYTES = 8 * 1024 * 1024  # 历史回放中内嵌图片/文档 base64 的解码上限
 PROJECT_ROOT = Path(__file__).resolve().parent.parent   # 项目根目录（Claude-Control/）
 
 log = logging.getLogger("claude-control")
@@ -89,6 +89,7 @@ class Config:
     interact_permission_timeout: int = 300       # 单次权限审批超时秒数（CC_INTERACT_PERMISSION_TIMEOUT）
     interact_turn_timeout: int = 600             # 单轮交互整体超时秒数（CC_INTERACT_TURN_TIMEOUT）
     claude_bin: str = "claude"                   # claude CLI 路径（CC_CLAUDE_BIN，测试注入替身）
+    default_cwd: Path = Path.home()              # 新建会话的工作目录（CC_DEFAULT_CWD，默认用户主目录）
     auto_open: bool = True                       # 启动时自动打开连接面板（CC_AUTO_OPEN=0 关闭）
     qr_png_path: Path = PROJECT_ROOT / "连接二维码.png"  # 启动生成的二维码 PNG 位置（CC_QR_PNG_PATH）
     email_to: str = "3555452607@qq.com"          # 邮件收件人（CC_EMAIL_TO）
@@ -117,6 +118,7 @@ class Config:
             interact_permission_timeout=int(_b("CC_INTERACT_PERMISSION_TIMEOUT", "300") or "300"),
             interact_turn_timeout=int(_b("CC_INTERACT_TURN_TIMEOUT", "600") or "600"),
             claude_bin=_b("CC_CLAUDE_BIN", "claude"),
+            default_cwd=Path(_b("CC_DEFAULT_CWD", str(Path.home()))),
             auto_open=_b("CC_AUTO_OPEN", "1").lower() in ("1", "true", "yes"),
             qr_png_path=Path(_b("CC_QR_PNG_PATH", str(PROJECT_ROOT / "连接二维码.png"))),
             email_to=_b("CC_EMAIL_TO", "3555452607@qq.com"),
@@ -253,7 +255,8 @@ def _validate_attachments(raw: Any, max_bytes: int) -> tuple:
             return [], "附件数据为空或非法 base64"
         if (len(data) * 3) // 4 > max_bytes:
             return [], f"附件过大（超过 {max_bytes // (1024 * 1024)} MiB）"
-        clean.append({"type": atype, "mediaType": media, "data": data})
+        name = str(a.get("name") or a.get("fileName") or "")[:200]
+        clean.append({"type": atype, "mediaType": media, "data": data, "name": name})
     return clean, ""
 
 
@@ -368,12 +371,17 @@ def _content_to_blocks(content: Any) -> List[dict]:
                 blocks.append({"type": "text", "text": "🖼️ 图片过大，未在历史中传输"})
         elif btype == "document":
             src = item.get("source") or {}
-            blocks.append({
-                "type": "document",
-                "mediaType": src.get("media_type", "application/pdf"),
-                "name": item.get("name") or item.get("file_name", ""),
-                "data": (src.get("data") or "").replace("\n", "").replace("\r", ""),
-            })
+            data = (src.get("data") or "").replace("\n", "").replace("\r", "")
+            decoded_len = (len(data) * 3) // 4
+            if decoded_len <= MAX_ATTACHMENT_HISTORY_BYTES:
+                blocks.append({
+                    "type": "document",
+                    "mediaType": src.get("media_type", "application/pdf"),
+                    "name": item.get("name") or item.get("file_name", ""),
+                    "data": data,
+                })
+            else:
+                blocks.append({"type": "text", "text": "📄 文档过大，未在历史中传输"})
         else:
             blocks.append({"type": "text", "text": clean_text(json.dumps(item, ensure_ascii=False)[:500])})
     return blocks
@@ -880,11 +888,18 @@ class WSServer:
                              if ch.isalnum() or ch in "-_.")
         # 目标会话仍在运行（active/attention）时，--resume 会等待会话锁而死锁挂起，
         # 导致手机端命令卡死、无任何回显。这种情况改为开新会话。
+        # 同时解析子进程 cwd：恢复会话用其原始 cwd，新建会话用默认目录（用户主目录），
+        # 使新会话脱离本项目文件夹、不同会话各自 cwd 避免争同一项目锁。
+        cwd = ""
         if session_id:
             sess = self.monitor.sessions.get(session_id)
             if sess is not None and sess.status in ("active", "attention"):
                 log.info("send-prompt: 目标会话 %s 仍在运行，改为开新会话", session_id)
                 session_id = ""
+            elif sess is not None:
+                cwd = sess.cwd
+        if not cwd:
+            cwd = str(self.cfg.default_cwd)
         self._prompt_seq += 1
         rec = {
             "id": self._prompt_seq,
@@ -898,7 +913,7 @@ class WSServer:
         }
         self.prompts.insert(0, rec)
         del self.prompts[200:]  # 最多保留最近 200 条
-        asyncio.create_task(self.interact.run(ws, prompt, session_id or None, attachments, rec))
+        asyncio.create_task(self.interact.run(ws, prompt, session_id or None, attachments, rec, cwd=cwd))
 
 
 # ---------------------------------------------------------------------------
@@ -915,7 +930,11 @@ def _user_message_line(prompt: str, attachments: List[dict]) -> str:
         if atype == "image":
             content.append({"type": "image", "source": src})
         elif atype == "document":
-            content.append({"type": "document", "source": src})
+            block = {"type": "document", "source": src}
+            name = str(a.get("name") or a.get("title") or a.get("fileName") or "")
+            if name:
+                block["title"] = name
+            content.append(block)
     if prompt:
         content.append({"type": "text", "text": prompt})
     return json.dumps({"type": "user",
@@ -1023,7 +1042,8 @@ class InteractRunner:
 
     async def run(self, ws, prompt: str, session_id: Optional[str],
                   attachments: Optional[List[dict]] = None,
-                  rec: Optional[dict] = None) -> None:
+                  rec: Optional[dict] = None,
+                  cwd: Optional[str] = None) -> None:
         async def send(obj: dict) -> None:
             try:
                 await ws.send(json.dumps(obj, ensure_ascii=False))
@@ -1054,6 +1074,7 @@ class InteractRunner:
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd or None,
                 )
             except Exception as exc:
                 hint = ""

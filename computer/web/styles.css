@@ -1,4 +1,5 @@
 :root {
+  color-scheme: dark;
   --bg: #0e1117;
   --bg-raise: #161b22;
   --bg-raise2: #1c2330;
@@ -159,6 +160,33 @@ body {
   padding: 8px 10px;
   overflow-x: auto;
 }
+
+/* image / document blocks (multimodal) */
+.blk-image {
+  max-width: 100%;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  display: block;
+  max-height: 360px;
+  object-fit: contain;
+  background: var(--bg);
+}
+.blk-document {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raise);
+  color: var(--text);
+  font-size: 13px;
+  text-decoration: none;
+  cursor: pointer;
+}
+.blk-document:hover { border-color: var(--accent); }
+.blk-document .doc-name { font-weight: 600; }
+.blk-document .doc-type { color: var(--text-dim); font-size: 11.5px; }
 
 /* thinking block — collapsed by default */
 .blk-thinking {
