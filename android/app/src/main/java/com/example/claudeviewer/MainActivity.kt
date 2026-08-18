@@ -4,6 +4,7 @@ import android.content.Intent
 import android.content.res.ColorStateList
 import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.util.Base64
 import android.view.LayoutInflater
 import android.view.Menu
@@ -28,6 +29,11 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.textfield.TextInputEditText
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 远程会话监视器：连接电脑端 relay_server，浏览会话并实时查看消息。
@@ -50,6 +56,7 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
     private lateinit var sendBtn: MaterialButton
     private lateinit var attachBtn: ImageButton
     private lateinit var attachmentBar: LinearLayout
+    private lateinit var newSessionBanner: TextView
 
     private val adapter = MessageAdapter()
     private var ws: WebSocketClient? = null
@@ -66,6 +73,8 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
     private val pendingAttachments = mutableListOf<Attachment>()
     private val permissionQueue = java.util.ArrayDeque<PermissionRequest>()
     private var permissionDialogShowing = false
+    // 附件读取的后台协程作用域（避免在主线程 readBytes 导致 ANR/OOM）
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private data class PermissionRequest(
         val requestId: String,
@@ -81,6 +90,7 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         private const val MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
         // 占位项：spinner 首位“请选择会话”，选中它不加载任何历史
         private val PLACEHOLDER = SessionInfo(id = "", cwd = "", title = "", status = "", model = "")
+        private val IMAGE_MIMES = setOf("image/jpeg", "image/png", "image/gif", "image/webp")
     }
 
     private val scanLauncher = registerForActivityResult(ScanContract()) { result ->
@@ -116,6 +126,7 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         sendBtn = findViewById(R.id.send_btn)
         attachBtn = findViewById(R.id.attach_btn)
         attachmentBar = findViewById(R.id.attachment_bar)
+        newSessionBanner = findViewById(R.id.new_session_banner)
 
         recycler.layoutManager = LinearLayoutManager(this)
         recycler.adapter = adapter
@@ -145,6 +156,8 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
         }
 
+        // 主题切换 / 进程重建后恢复上次选中的会话（等会话列表到达后由 maybeSelectPending 选中）
+        pendingSessionId = prefs.getString("last_session", "")?.takeIf { it.isNotBlank() }
         handleIntent(intent)
     }
 
@@ -152,6 +165,11 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         super.onNewIntent(intent)
         setIntent(intent)
         handleIntent(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        autoConnectIfNeeded()
     }
 
     override fun onDestroy() {
@@ -185,7 +203,10 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         suppressSelection = false
         adapter.submit(emptyList(), clear = true)
         updateEmptyState()
-        toast(getString(R.string.new_session_hint))
+        // 显式提示条：让用户第一时间察觉已切到「新会话」状态，下一条 prompt 开新会话
+        newSessionBanner.visibility = View.VISIBLE
+        newSessionBanner.alpha = 0f
+        newSessionBanner.animate().alpha(1f).setDuration(180).start()
     }
 
     private fun applyThemeMode(mode: String) {
@@ -215,30 +236,59 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
 
     // ---- 附件（多模态） ----
     private fun launchAttach() {
-        attachLauncher.launch(arrayOf(
-            "image/jpeg", "image/png", "image/gif", "image/webp", "application/pdf"))
+        attachLauncher.launch((IMAGE_MIMES + "application/pdf").toTypedArray())
     }
 
+    /** 在后台协程读取选中的附件，主线程只回填结果（避免大文件在主线程 readBytes 卡死/超内存）。 */
     private fun onAttachmentsPicked(uris: List<Uri>) {
-        for (uri in uris) {
-            if (pendingAttachments.size >= MAX_ATTACHMENTS) {
-                toast(getString(R.string.attachment_max))
-                break
+        ioScope.launch {
+            val added = mutableListOf<Attachment>()
+            for (uri in uris) {
+                if (pendingAttachments.size + added.size >= MAX_ATTACHMENTS) {
+                    withContext(Dispatchers.Main) { toast(getString(R.string.attachment_max)) }
+                    break
+                }
+                val mime = contentResolver.getType(uri)
+                if (mime == null || !(mime.startsWith("image/") || mime == "application/pdf")) {
+                    withContext(Dispatchers.Main) { toast(getString(R.string.attachment_unsupported)) }
+                    continue
+                }
+                val bytes = try { readLimited(uri, MAX_ATTACHMENT_BYTES) } catch (_: Exception) { null }
+                if (bytes == null) {
+                    withContext(Dispatchers.Main) { toast(getString(R.string.attachment_read_failed)) }
+                    continue
+                }
+                if (bytes.size > MAX_ATTACHMENT_BYTES) {
+                    withContext(Dispatchers.Main) { toast(getString(R.string.attachment_too_large)) }
+                    continue
+                }
+                val type = if (mime.startsWith("image/")) "image" else "document"
+                added.add(Attachment(type, mime, Base64.encodeToString(bytes, Base64.NO_WRAP)))
             }
-            val mime = contentResolver.getType(uri)
-            if (mime == null || !(mime.startsWith("image/") || mime == "application/pdf")) {
-                toast(getString(R.string.attachment_unsupported))
-                continue
+            withContext(Dispatchers.Main) {
+                pendingAttachments.addAll(added)
+                renderAttachmentBar()
             }
-            val bytes = try {
-                contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            } catch (_: Exception) { null }
-            if (bytes == null) { toast(getString(R.string.attachment_read_failed)); continue }
-            if (bytes.size > MAX_ATTACHMENT_BYTES) { toast(getString(R.string.attachment_too_large)); continue }
-            val type = if (mime.startsWith("image/")) "image" else "document"
-            pendingAttachments.add(Attachment(type, mime, Base64.encodeToString(bytes, Base64.NO_WRAP)))
         }
-        renderAttachmentBar()
+    }
+
+    /** 流式读取附件，读满 maxBytes 即止（返回的字节可能略超，交由调用方按大小拒绝），避免超大文件一次读入内存。 */
+    private fun readLimited(uri: Uri, maxBytes: Int): ByteArray? {
+        val stream = try { contentResolver.openInputStream(uri) } catch (_: Exception) { return null }
+            ?: return null
+        return stream.use { input ->
+            val out = java.io.ByteArrayOutputStream()
+            val buf = ByteArray(8192)
+            var total = 0
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                total += n
+                out.write(buf, 0, n)
+                if (total >= maxBytes) break
+            }
+            out.toByteArray()
+        }
     }
 
     private fun renderAttachmentBar() {
@@ -270,6 +320,8 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         if (ws != null) {
             ws?.close()
             ws = null
+            getSharedPreferences("claudeviewer", MODE_PRIVATE).edit()
+                .putBoolean("connected", false).apply()
             connectBtn.text = getString(R.string.connect)
             setStatus(R.string.status_disconnected, R.color.status_idle)
             configPanel.visibility = View.VISIBLE
@@ -277,16 +329,31 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         }
         val url = urlInput.text.toString().trim().trimEnd('/')
         if (url.isEmpty()) { toast(getString(R.string.input_url_required)); return }
+        val token = tokenInput.text.toString().trim()
         getSharedPreferences("claudeviewer", MODE_PRIVATE).edit()
             .putString("ws_url", url)
-            .putString("ws_token", tokenInput.text.toString().trim())
+            .putString("ws_token", token)
+            .putBoolean("connected", true)
             .apply()
+        doConnect(url, token)
+    }
 
+    /** 建立 WebSocket 连接（首次连接与自动重连共用）。 */
+    private fun doConnect(url: String, token: String) {
         setStatus(R.string.status_connecting, R.color.status_connecting)
         connectBtn.isEnabled = false
         configPanel.visibility = View.GONE
-        ws = WebSocketClient(url, tokenInput.text.toString().trim())
+        ws = WebSocketClient(url, token)
         ws?.connect(this)
+    }
+
+    /** 从后台返回 / 主题切换重建后，若之前处于已连接状态则自动重连（避免文件选择器导致断连）。 */
+    private fun autoConnectIfNeeded() {
+        if (ws != null) return
+        if (!getSharedPreferences("claudeviewer", MODE_PRIVATE).getBoolean("connected", false)) return
+        val url = urlInput.text.toString().trim().trimEnd('/')
+        if (url.isEmpty()) return
+        doConnect(url, tokenInput.text.toString().trim())
     }
 
     override fun onOpen() {
@@ -489,6 +556,8 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
             oldestLoadedIdx = null
             hasMoreOlder = false
             loadingOlder = false
+            getSharedPreferences("claudeviewer", MODE_PRIVATE).edit()
+                .putString("last_session", s.id).apply()
             adapter.submit(emptyList(), clear = true)
             updateEmptyState()
             ws?.getHistory(s.id, limit = HISTORY_PAGE)
@@ -540,6 +609,13 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         else -> R.color.status_idle
     }
 
+    private fun sessionStatusLabel(status: String): String = when (status) {
+        "active" -> getString(R.string.session_status_active)
+        "attention" -> getString(R.string.session_status_attention)
+        "ended" -> getString(R.string.session_status_ended)
+        else -> getString(R.string.session_status_idle)
+    }
+
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
 
     private fun launchScan() {
@@ -581,6 +657,7 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         promptInput.setText("")
         pendingAttachments.clear()
         renderAttachmentBar()
+        newSessionBanner.visibility = View.GONE
         toast(getString(R.string.prompt_sent))
     }
 
@@ -640,6 +717,15 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
                 } else {
                     sub.visibility = View.GONE
                 }
+            }
+            // 右侧状态标签（活跃/待审批/空闲/已结束），与左侧状态点同色
+            val statusLbl = v.findViewById<TextView>(R.id.session_status)
+            if (isPlaceholder) {
+                statusLbl.visibility = View.GONE
+            } else {
+                statusLbl.visibility = View.VISIBLE
+                statusLbl.text = sessionStatusLabel(s.status)
+                statusLbl.setTextColor(color)
             }
             return v
         }

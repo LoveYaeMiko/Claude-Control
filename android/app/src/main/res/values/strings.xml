@@ -16,6 +16,12 @@
     <string name="status_disconnected">已断开</string>
     <string name="status_failed">连接失败</string>
     <string name="status_no_sessions">无会话</string>
+
+    <!-- 会话状态标签 -->
+    <string name="session_status_active">活跃</string>
+    <string name="session_status_attention">待审批</string>
+    <string name="session_status_idle">空闲</string>
+    <string name="session_status_ended">已结束</string>
     <string name="empty_messages">连接后选择会话查看消息</string>
 
     <!-- 消息 -->
@@ -48,7 +54,7 @@
 
     <!-- 新建会话 / 主题 -->
     <string name="new_session">新建会话</string>
-    <string name="new_session_hint">下次发送将新建会话</string>
+    <string name="new_session_hint">✨ 已新建会话 · 下次发送将开启新会话</string>
     <string name="theme_switch">主题</string>
     <string name="theme_system">跟随系统</string>
     <string name="theme_light">浅色</string>

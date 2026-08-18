@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -993,9 +994,22 @@ class InteractRunner:
         self._sem = asyncio.Semaphore(self.MAX_CONCURRENT)
         self._last: Dict[int, float] = {}
 
+    def _resolve_claude_bin(self) -> str:
+        """把 claude 命令名解析为可执行路径。
+
+        Windows 上 claude 是 npm 安装的 .cmd shim，裸命令名无法被
+        create_subprocess_exec 经 PATH 找到（CreateProcess 只补 .exe 后缀，
+        报 [WinError 2]）。这里用 shutil.which（按 PATHEXT 含 .CMD/.BAT）
+        解析为全路径，让 subprocess 走 .cmd/.bat 经 cmd.exe 执行的分支。
+        """
+        bin_path = self.cfg.claude_bin
+        if os.sep in bin_path or "/" in bin_path or os.path.isabs(bin_path):
+            return bin_path
+        return shutil.which(bin_path) or bin_path
+
     def _command(self, session_id: Optional[str]) -> List[str]:
         """构造固定命令（列表，不含任何用户输入；prompt 走 stdin 传入）。"""
-        parts = [self.cfg.claude_bin, "-p", "--verbose",
+        parts = [self._resolve_claude_bin(), "-p", "--verbose",
                  "--input-format", "stream-json",
                  "--output-format", "stream-json",
                  "--permission-mode", _cli_permission_mode(self.cfg.interact_permission_mode)]
@@ -1042,9 +1056,12 @@ class InteractRunner:
                     stderr=asyncio.subprocess.PIPE,
                 )
             except Exception as exc:
-                set_status("失败", message=f"无法启动 claude：{exc}")
+                hint = ""
+                if isinstance(exc, FileNotFoundError) or "WinError 2" in str(exc):
+                    hint = "（请确认已安装 Claude Code 且 claude 在 PATH 中，或用 CC_CLAUDE_BIN 指定完整路径）"
+                set_status("失败", message=f"无法启动 claude：{exc}{hint}")
                 await send({"type": "interaction", "status": "error",
-                            "code": "launch", "message": f"无法启动 claude：{exc}"})
+                            "code": "launch", "message": f"无法启动 claude：{exc}{hint}"})
                 return
 
             # stdin 单写者：初始消息 / control_response 都经此队列串行写入，避免竞态

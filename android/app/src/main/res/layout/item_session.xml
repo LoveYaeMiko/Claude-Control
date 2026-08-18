@@ -4,7 +4,10 @@
     android:layout_height="wrap_content"
     android:gravity="center_vertical"
     android:orientation="horizontal"
-    android:padding="12dp">
+    android:paddingStart="12dp"
+    android:paddingEnd="12dp"
+    android:paddingTop="10dp"
+    android:paddingBottom="10dp">
 
     <!-- 状态色点（代码中按 active/attention/idle/ended 着色） -->
     <View
@@ -33,10 +36,26 @@
             android:id="@+id/session_subtitle"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
             android:ellipsize="end"
             android:maxLines="1"
             android:textColor="@color/on_surface_variant"
             android:textSize="12sp" />
     </LinearLayout>
+
+    <!-- 右侧状态标签（活跃/待审批/空闲/已结束），代码中按状态着色 -->
+    <TextView
+        android:id="@+id/session_status"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:background="@drawable/status_pill_bg"
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp"
+        android:paddingTop="2dp"
+        android:paddingBottom="2dp"
+        android:textColor="@color/on_surface_variant"
+        android:textSize="11sp"
+        android:visibility="gone" />
 
 </LinearLayout>

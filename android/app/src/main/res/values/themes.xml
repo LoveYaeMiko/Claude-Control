@@ -15,6 +15,16 @@
         <item name="colorSurfaceVariant">@color/surface_variant</item>
         <item name="colorOnSurfaceVariant">@color/on_surface_variant</item>
         <item name="colorOutline">@color/outline</item>
+        <item name="colorOutlineVariant">@color/outline</item>
+        <!-- Material3 表面容器角色：对话框/下拉/文本域等组件默认使用这些角色，
+             显式映射到主题调色板，避免深色模式下仍使用 Material3 默认浅灰容器 -->
+        <item name="colorSurfaceContainerLowest">@color/background</item>
+        <item name="colorSurfaceContainerLow">@color/surface_variant</item>
+        <item name="colorSurfaceContainer">@color/surface_variant</item>
+        <item name="colorSurfaceContainerHigh">@color/surface</item>
+        <item name="colorSurfaceContainerHighest">@color/surface</item>
+        <item name="colorSurfaceBright">@color/surface</item>
+        <item name="colorSurfaceDim">@color/surface_variant</item>
         <item name="colorError">@color/error</item>
         <item name="colorOnError">@color/on_primary</item>
         <item name="android:colorBackground">@color/background</item>

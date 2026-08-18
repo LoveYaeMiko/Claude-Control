@@ -126,6 +126,21 @@
         android:layout_marginTop="6dp"
         android:popupBackground="@color/surface_variant" />
 
+    <!-- 新建会话提示条：点击「新建会话」后出现，下次发送即消失 -->
+    <TextView
+        android:id="@+id/new_session_banner"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:layout_marginEnd="12dp"
+        android:layout_marginTop="6dp"
+        android:background="@drawable/new_session_banner_bg"
+        android:padding="10dp"
+        android:text="@string/new_session_hint"
+        android:textColor="@color/on_primary"
+        android:textSize="13sp"
+        android:visibility="gone" />
+
     <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
