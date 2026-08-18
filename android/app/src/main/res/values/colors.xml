@@ -1,44 +1,54 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Material3 深色调色板 -->
-    <color name="primary">#4C8DFF</color>
+    <!-- Material3 浅色调色板 -->
+    <color name="primary">#2F6FDB</color>
     <color name="on_primary">#FFFFFF</color>
-    <color name="primary_container">#1E3A5F</color>
-    <color name="on_primary_container">#D6E4FF</color>
-    <color name="background">#1A1D24</color>
-    <color name="surface">#222733</color>
-    <color name="surface_variant">#2A303C</color>
-    <color name="on_surface">#E8ECF4</color>
-    <color name="on_surface_variant">#A0A8B8</color>
-    <color name="outline">#5A6472</color>
-    <color name="error">#FF6B6B</color>
+    <color name="primary_container">#D6E4FF</color>
+    <color name="on_primary_container">#0B2A5B</color>
+    <color name="background">#F7F8FA</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="surface_variant">#E8ECF1</color>
+    <color name="on_surface">#1A1D24</color>
+    <color name="on_surface_variant">#5A6472</color>
+    <color name="outline">#C2CAD4</color>
+    <color name="error">#E5484D</color>
 
     <!-- 连接状态色 -->
-    <color name="status_idle">#A0A8B8</color>
-    <color name="status_connecting">#F5A623</color>
-    <color name="status_connected">#2ECC71</color>
-    <color name="status_failed">#FF6B6B</color>
-    <color name="status_active">#2ECC71</color>
-    <color name="status_attention">#F5A623</color>
-    <color name="status_ended">#5A6472</color>
+    <color name="status_idle">#5A6472</color>
+    <color name="status_connecting">#D98324</color>
+    <color name="status_connected">#1E9E57</color>
+    <color name="status_failed">#E5484D</color>
+    <color name="status_active">#1E9E57</color>
+    <color name="status_attention">#D98324</color>
+    <color name="status_ended">#9AA3B2</color>
 
     <!-- 角色色 -->
-    <color name="role_user">#7FB4FF</color>
-    <color name="role_assistant">#64D6A0</color>
-    <color name="role_system">#A0A8B8</color>
+    <color name="role_user">#2F6FDB</color>
+    <color name="role_assistant">#1E9E57</color>
+    <color name="role_system">#5A6472</color>
 
     <!-- 消息语义色 -->
-    <color name="msg_user_bg">#142B7FFF</color>
-    <color name="msg_header">#A0A8B8</color>
-    <color name="msg_text_primary">#E8ECF4</color>
-    <color name="msg_text_dim">#A0A8B8</color>
-    <color name="msg_text_muted">#9AA3B2</color>
-    <color name="msg_text_error">#FF6B6B</color>
-    <color name="msg_label">#C9D2E0</color>
-    <color name="msg_highlight">#22FFFFFF</color>
+    <color name="msg_user_bg">#E3EEFF</color>
+    <color name="msg_header">#5A6472</color>
+    <color name="msg_text_primary">#1A1D24</color>
+    <color name="msg_text_dim">#5A6472</color>
+    <color name="msg_text_muted">#6B7686</color>
+    <color name="msg_text_error">#E5484D</color>
+    <color name="msg_label">#3A4553</color>
+    <color name="msg_highlight">#14000000</color>
+
+    <!-- 气泡 / 头像 / 时间分隔 -->
+    <color name="msg_time_divider">#5A6472</color>
+    <color name="avatar_user_bg">#2F6FDB</color>
+    <color name="avatar_user_fg">#FFFFFF</color>
+    <color name="avatar_assistant_bg">#E8ECF1</color>
+    <color name="avatar_assistant_fg">#1A1D24</color>
+    <color name="avatar_system_bg">#C2CAD4</color>
+    <color name="avatar_system_fg">#1A1D24</color>
+    <color name="document_bg">#F0F2F5</color>
 
     <!-- 图标 / 启动器 -->
-    <color name="ic_launcher_background">#1A1D24</color>
+    <color name="ic_launcher_background">#F7F8FA</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
 </resources>

@@ -7,51 +7,84 @@
     android:orientation="vertical"
     android:paddingStart="10dp"
     android:paddingEnd="10dp"
-    android:paddingTop="4dp"
-    android:paddingBottom="4dp">
+    android:paddingTop="2dp"
+    android:paddingBottom="2dp">
 
-    <com.google.android.material.card.MaterialCardView
-        android:id="@+id/msg_card"
+    <!-- 时间分隔条（跨会话消息分组，默认隐藏） -->
+    <TextView
+        android:id="@+id/msg_time_divider"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center_horizontal"
+        android:layout_marginTop="4dp"
+        android:layout_marginBottom="2dp"
+        android:paddingStart="10dp"
+        android:paddingEnd="10dp"
+        android:paddingTop="2dp"
+        android:paddingBottom="2dp"
+        android:background="@drawable/divider_pill"
+        android:textColor="@color/msg_time_divider"
+        android:textSize="11sp"
+        android:visibility="gone" />
+
+    <LinearLayout
+        android:id="@+id/msg_row"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        app:cardBackgroundColor="@color/surface"
-        app:cardCornerRadius="12dp"
-        app:cardElevation="0dp"
-        app:strokeWidth="0dp">
+        android:orientation="horizontal"
+        android:gravity="start">
 
-        <LinearLayout
-            android:layout_width="match_parent"
+        <TextView
+            android:id="@+id/avatar_left"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
+            android:layout_marginEnd="8dp"
+            android:background="@drawable/avatar_bg"
+            android:gravity="center"
+            android:textSize="14sp"
+            android:visibility="gone" />
+
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/msg_card"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:orientation="horizontal">
-
-            <!-- 角色强调条（代码中按 user/assistant/system 着色） -->
-            <View
-                android:id="@+id/msg_accent"
-                android:layout_width="3dp"
-                android:layout_height="match_parent"
-                android:background="@color/role_system" />
+            app:cardBackgroundColor="@color/surface"
+            app:cardCornerRadius="16dp"
+            app:cardElevation="0dp"
+            app:strokeWidth="0dp">
 
             <LinearLayout
-                android:layout_width="0dp"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
                 android:orientation="vertical"
-                android:padding="8dp">
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp"
+                android:paddingTop="6dp"
+                android:paddingBottom="6dp">
 
                 <TextView
                     android:id="@+id/msg_header"
-                    android:layout_width="match_parent"
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:textColor="@color/msg_header"
                     android:textSize="11sp" />
 
                 <LinearLayout
                     android:id="@+id/msg_body"
-                    android:layout_width="match_parent"
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:orientation="vertical" />
             </LinearLayout>
-        </LinearLayout>
-    </com.google.android.material.card.MaterialCardView>
+        </com.google.android.material.card.MaterialCardView>
 
+        <TextView
+            android:id="@+id/avatar_right"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
+            android:layout_marginStart="8dp"
+            android:background="@drawable/avatar_bg"
+            android:gravity="center"
+            android:textSize="14sp"
+            android:visibility="gone" />
+    </LinearLayout>
 </LinearLayout>

@@ -17,6 +17,11 @@ object Markdown {
     @Volatile
     private var instance: Markwon? = null
 
+    /** 主题切换时清空缓存的 Markwon，否则 markdown 会残留旧主题的颜色。 */
+    fun reset() {
+        instance = null
+    }
+
     fun get(context: Context): Markwon {
         instance?.let { return it }
         synchronized(this) {

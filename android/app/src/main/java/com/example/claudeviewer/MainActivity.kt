@@ -4,19 +4,27 @@ import android.content.Intent
 import android.content.res.ColorStateList
 import android.net.Uri
 import android.os.Bundle
+import android.util.Base64
 import android.view.LayoutInflater
+import android.view.Menu
+import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ArrayAdapter
+import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.app.AppCompatDelegate
 import androidx.appcompat.widget.AppCompatSpinner
+import androidx.appcompat.widget.Toolbar
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.textfield.TextInputEditText
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
@@ -40,6 +48,8 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
     private lateinit var inputBar: LinearLayout
     private lateinit var promptInput: TextInputEditText
     private lateinit var sendBtn: MaterialButton
+    private lateinit var attachBtn: ImageButton
+    private lateinit var attachmentBar: LinearLayout
 
     private val adapter = MessageAdapter()
     private var ws: WebSocketClient? = null
@@ -52,9 +62,23 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
     private var loadingOlder = false
     private var oldestLoadedIdx: Int? = null
     private var suppressSelection = false
+    // 多模态附件 + 权限审批
+    private val pendingAttachments = mutableListOf<Attachment>()
+    private val permissionQueue = java.util.ArrayDeque<PermissionRequest>()
+    private var permissionDialogShowing = false
+
+    private data class PermissionRequest(
+        val requestId: String,
+        val sessionId: String,
+        val toolName: String,
+        val description: String,
+        val input: String,
+    )
 
     companion object {
         private const val HISTORY_PAGE = 50
+        private const val MAX_ATTACHMENTS = 5
+        private const val MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
         // 占位项：spinner 首位“请选择会话”，选中它不加载任何历史
         private val PLACEHOLDER = SessionInfo(id = "", cwd = "", title = "", status = "", model = "")
     }
@@ -63,9 +87,18 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         result.contents?.let { applyConfigUri(it) }
     }
 
+    private val attachLauncher = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        onAttachmentsPicked(uris)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        val prefs = getSharedPreferences("claudeviewer", MODE_PRIVATE)
+        applyThemeMode(prefs.getString("theme", "system") ?: "system")
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        val toolbar = findViewById<Toolbar>(R.id.toolbar)
+        setSupportActionBar(toolbar)
 
         urlInput = findViewById(R.id.url_input)
         tokenInput = findViewById(R.id.token_input)
@@ -81,6 +114,8 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         inputBar = findViewById(R.id.input_bar)
         promptInput = findViewById(R.id.prompt_input)
         sendBtn = findViewById(R.id.send_btn)
+        attachBtn = findViewById(R.id.attach_btn)
+        attachmentBar = findViewById(R.id.attachment_bar)
 
         recycler.layoutManager = LinearLayoutManager(this)
         recycler.adapter = adapter
@@ -90,13 +125,13 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
             }
         })
 
-        val prefs = getSharedPreferences("claudeviewer", MODE_PRIVATE)
         urlInput.setText(prefs.getString("ws_url", "ws://192.168.1.38:9876"))
         tokenInput.setText(prefs.getString("ws_token", ""))
 
         connectBtn.setOnClickListener { toggleConnection() }
         scanBtn.setOnClickListener { launchScan() }
         sendBtn.setOnClickListener { sendPrompt() }
+        attachBtn.setOnClickListener { launchAttach() }
         configToggle.setOnClickListener {
             val show = configPanel.visibility != View.VISIBLE
             configPanel.visibility = if (show) View.VISIBLE else View.GONE
@@ -123,6 +158,113 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         ws?.close()
         super.onDestroy()
     }
+
+    // ---- 菜单：新建会话 / 主题切换 ----
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        menuInflater.inflate(R.menu.main_menu, menu)
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        return when (item.itemId) {
+            R.id.action_new_session -> { newSession(); true }
+            R.id.action_theme -> { cycleTheme(); true }
+            else -> super.onOptionsItemSelected(item)
+        }
+    }
+
+    /** 清空当前会话选择，下一条 prompt 将开新会话（无 --resume）。 */
+    private fun newSession() {
+        selectedSessionId = null
+        historyLoadedFor = null
+        oldestLoadedIdx = null
+        hasMoreOlder = false
+        loadingOlder = false
+        suppressSelection = true
+        sessionSpinner.setSelection(0)
+        suppressSelection = false
+        adapter.submit(emptyList(), clear = true)
+        updateEmptyState()
+        toast(getString(R.string.new_session_hint))
+    }
+
+    private fun applyThemeMode(mode: String) {
+        when (mode) {
+            "light" -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO)
+            "dark" -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES)
+            else -> AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM)
+        }
+    }
+
+    private fun cycleTheme() {
+        val prefs = getSharedPreferences("claudeviewer", MODE_PRIVATE)
+        val next = when (prefs.getString("theme", "system") ?: "system") {
+            "system" -> "light"
+            "light" -> "dark"
+            else -> "system"
+        }
+        prefs.edit().putString("theme", next).apply()
+        Markdown.reset()
+        toast(when (next) {
+            "light" -> getString(R.string.theme_light)
+            "dark" -> getString(R.string.theme_dark)
+            else -> getString(R.string.theme_system)
+        })
+        recreate()
+    }
+
+    // ---- 附件（多模态） ----
+    private fun launchAttach() {
+        attachLauncher.launch(arrayOf(
+            "image/jpeg", "image/png", "image/gif", "image/webp", "application/pdf"))
+    }
+
+    private fun onAttachmentsPicked(uris: List<Uri>) {
+        for (uri in uris) {
+            if (pendingAttachments.size >= MAX_ATTACHMENTS) {
+                toast(getString(R.string.attachment_max))
+                break
+            }
+            val mime = contentResolver.getType(uri)
+            if (mime == null || !(mime.startsWith("image/") || mime == "application/pdf")) {
+                toast(getString(R.string.attachment_unsupported))
+                continue
+            }
+            val bytes = try {
+                contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            } catch (_: Exception) { null }
+            if (bytes == null) { toast(getString(R.string.attachment_read_failed)); continue }
+            if (bytes.size > MAX_ATTACHMENT_BYTES) { toast(getString(R.string.attachment_too_large)); continue }
+            val type = if (mime.startsWith("image/")) "image" else "document"
+            pendingAttachments.add(Attachment(type, mime, Base64.encodeToString(bytes, Base64.NO_WRAP)))
+        }
+        renderAttachmentBar()
+    }
+
+    private fun renderAttachmentBar() {
+        attachmentBar.removeAllViews()
+        attachmentBar.visibility = if (pendingAttachments.isEmpty()) View.GONE else View.VISIBLE
+        for ((i, att) in pendingAttachments.withIndex()) {
+            val chip = TextView(this)
+            chip.text = (if (att.type == "image") "🖼️ " else "📄 ") + att.mediaType + "  ✕"
+            chip.setTextColor(ContextCompat.getColor(this, R.color.msg_text_primary))
+            chip.setBackgroundResource(R.drawable.document_chip_bg)
+            chip.setPadding(dp(10), dp(6), dp(10), dp(6))
+            chip.setOnClickListener {
+                if (i < pendingAttachments.size) {
+                    pendingAttachments.removeAt(i)
+                    renderAttachmentBar()
+                }
+            }
+            val lp = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT)
+            lp.marginEnd = dp(6)
+            attachmentBar.addView(chip, lp)
+        }
+    }
+
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
     private fun toggleConnection() {
         if (ws != null) {
@@ -271,6 +413,49 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
         }
     }
 
+    override fun onPermissionRequest(requestId: String, sessionId: String, toolName: String, displayName: String, description: String, input: String) {
+        runOnUiThread {
+            if (requestId.isBlank()) return@runOnUiThread
+            permissionQueue.addLast(PermissionRequest(requestId, sessionId, toolName, description, input))
+            showNextPermission()
+        }
+    }
+
+    override fun onPermissionResponseError(requestId: String, message: String) {
+        runOnUiThread { toast(getString(R.string.permission_unknown)) }
+    }
+
+    /** 一次只弹一个审批框，决策后出队下一个（并行工具调用会产生多个审批请求）。 */
+    private fun showNextPermission() {
+        if (permissionDialogShowing) return
+        val req = permissionQueue.pollFirst() ?: return
+        permissionDialogShowing = true
+        val detail = buildString {
+            if (req.description.isNotBlank()) append(req.description).append("\n\n")
+            if (req.input.isNotBlank()) append(req.input.take(1200))
+        }.trim()
+        MaterialAlertDialogBuilder(this)
+            .setTitle(getString(R.string.permission_title, req.toolName))
+            .setMessage(detail.ifBlank { getString(R.string.permission_title, req.toolName) })
+            .setPositiveButton(getString(R.string.permission_allow)) { _, _ ->
+                ws?.sendPermissionResponse(req.requestId, true)
+                permissionDialogShowing = false
+                showNextPermission()
+            }
+            .setNegativeButton(getString(R.string.permission_deny)) { _, _ ->
+                ws?.sendPermissionResponse(req.requestId, false, "Denied by user")
+                toast(getString(R.string.permission_denied))
+                permissionDialogShowing = false
+                showNextPermission()
+            }
+            .setOnCancelListener {
+                ws?.sendPermissionResponse(req.requestId, false, "Dismissed by user")
+                permissionDialogShowing = false
+                showNextPermission()
+            }
+            .show()
+    }
+
     private fun rebuildSpinner() {
         val current = selectedSessionId
         // 首位是占位项“选择要查看的会话”，真实会话从位置 1 开始
@@ -391,9 +576,11 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
     private fun sendPrompt() {
         val w = ws ?: run { toast(getString(R.string.not_connected)); return }
         val text = promptInput.text.toString().trim()
-        if (text.isEmpty()) return
-        w.sendPrompt(text, selectedSessionId)
+        if (text.isEmpty() && pendingAttachments.isEmpty()) return
+        w.sendPrompt(text, selectedSessionId, pendingAttachments.toList())
         promptInput.setText("")
+        pendingAttachments.clear()
+        renderAttachmentBar()
         toast(getString(R.string.prompt_sent))
     }
 

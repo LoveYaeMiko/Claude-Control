@@ -58,6 +58,9 @@ HISTORY_PAGE = 50            # get-history 单页下发的默认记录数（手�
 MAX_SESSIONS = 400           # 同时监控的会话数上限（超出后驱逐已结束会话）
 THINKING_LIMIT = 4000        # 单个 thinking 块下发的最大字符数（截断推理过程，控制 get-history 体积）
 TEXT_LIMIT = 16000           # 单个 text 块下发的最大字符数（截断超长正文，控制 get-history 体积）
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024   # 单个附件解码后最大字节数（CC_INTERACT_MAX_UPLOAD_MB 可调）
+MAX_ATTACHMENTS = 5                   # 单条 send-prompt 允许的最大附件数
+MAX_ATTACHMENT_HISTORY_BYTES = 1 * 1024 * 1024  # 历史回放中内嵌图片 base64 的解码上限
 PROJECT_ROOT = Path(__file__).resolve().parent.parent   # 项目根目录（Claude-Control/）
 
 log = logging.getLogger("claude-control")
@@ -81,6 +84,10 @@ class Config:
     allow_interact: bool = False                 # 手机端远程交互开关（CC_ALLOW_INTERACT=1）
     interact_permission_mode: str = "bypassPermissions"  # 交互权限模式（CC_INTERACT_PERMISSION_MODE）
     interact_model: str = ""                     # 交互所用模型（CC_INTERACT_MODEL，空=默认）
+    interact_max_upload_mb: int = 20             # 单个附件解码后最大兆数（CC_INTERACT_MAX_UPLOAD_MB）
+    interact_permission_timeout: int = 300       # 单次权限审批超时秒数（CC_INTERACT_PERMISSION_TIMEOUT）
+    interact_turn_timeout: int = 600             # 单轮交互整体超时秒数（CC_INTERACT_TURN_TIMEOUT）
+    claude_bin: str = "claude"                   # claude CLI 路径（CC_CLAUDE_BIN，测试注入替身）
     auto_open: bool = True                       # 启动时自动打开连接面板（CC_AUTO_OPEN=0 关闭）
     qr_png_path: Path = PROJECT_ROOT / "连接二维码.png"  # 启动生成的二维码 PNG 位置（CC_QR_PNG_PATH）
     email_to: str = "3555452607@qq.com"          # 邮件收件人（CC_EMAIL_TO）
@@ -105,6 +112,10 @@ class Config:
             allow_interact=_b("CC_ALLOW_INTERACT", "").lower() in ("1", "true", "yes"),
             interact_permission_mode=_b("CC_INTERACT_PERMISSION_MODE", "bypassPermissions"),
             interact_model=_b("CC_INTERACT_MODEL", ""),
+            interact_max_upload_mb=int(_b("CC_INTERACT_MAX_UPLOAD_MB", "20") or "20"),
+            interact_permission_timeout=int(_b("CC_INTERACT_PERMISSION_TIMEOUT", "300") or "300"),
+            interact_turn_timeout=int(_b("CC_INTERACT_TURN_TIMEOUT", "600") or "600"),
+            claude_bin=_b("CC_CLAUDE_BIN", "claude"),
             auto_open=_b("CC_AUTO_OPEN", "1").lower() in ("1", "true", "yes"),
             qr_png_path=Path(_b("CC_QR_PNG_PATH", str(PROJECT_ROOT / "连接二维码.png"))),
             email_to=_b("CC_EMAIL_TO", "3555452607@qq.com"),
@@ -196,6 +207,53 @@ PERMISSION_TOOLS = {
     "WebFetch", "WebSearch", "Glob", "Grep", "LS", "TodoWrite",
     "Agent", "Task", "Skill", "MCP",
 }
+
+# 交互权限模式的 CLI 拼写映射：内部约定用 "default" 表示“标准审批模式”，
+# 而 claude CLI 的 --permission-mode 把它拼作 "manual"（二者等价）。
+PERMISSION_MODE_ALIASES = {"default": "manual"}
+
+
+def _cli_permission_mode(mode: str) -> str:
+    """把内部权限模式名翻译成 claude CLI 接受的 --permission-mode 值。"""
+    return PERMISSION_MODE_ALIASES.get(mode, mode)
+
+
+# 多模态附件允许的 MIME 类型白名单
+ATTACHMENT_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+ATTACHMENT_DOC_TYPES = {"application/pdf"}
+
+
+def _validate_attachments(raw: Any, max_bytes: int) -> tuple:
+    """校验并清理 send-prompt 的附件列表。
+
+    返回 (clean_attachments, error)：error 非空表示校验失败（整条 prompt 应被拒绝）。
+    每个附件形如 {"type": "image"|"document", "mediaType": "...", "data": "<base64>"}。
+    """
+    if raw is None:
+        return [], ""
+    if not isinstance(raw, list):
+        return [], "附件格式错误"
+    if len(raw) > MAX_ATTACHMENTS:
+        return [], f"附件数量超过上限（最多 {MAX_ATTACHMENTS} 个）"
+    clean: List[dict] = []
+    for a in raw:
+        if not isinstance(a, dict):
+            return [], "附件格式错误"
+        atype = str(a.get("type", "") or "")
+        media = str(a.get("mediaType", "") or "").lower()
+        data = "".join(str(a.get("data", "") or "").split())  # 去空白/换行
+        if atype == "image" and media in ATTACHMENT_IMAGE_TYPES:
+            pass
+        elif atype == "document" and media in ATTACHMENT_DOC_TYPES:
+            pass
+        else:
+            return [], f"不支持的附件类型：{media or atype}"
+        if not data or not re.fullmatch(r"[A-Za-z0-9+/=]+", data):
+            return [], "附件数据为空或非法 base64"
+        if (len(data) * 3) // 4 > max_bytes:
+            return [], f"附件过大（超过 {max_bytes // (1024 * 1024)} MiB）"
+        clean.append({"type": atype, "mediaType": media, "data": data})
+    return clean, ""
 
 
 class Session:
@@ -294,6 +352,26 @@ def _content_to_blocks(content: Any) -> List[dict]:
                 "toolUseId": item.get("tool_use_id", ""),
                 "result": clean_text(str(item.get("content", "")), 8000),
                 "isError": bool(item.get("is_error", False)),
+            })
+        elif btype == "image":
+            src = item.get("source") or {}
+            data = (src.get("data") or "").replace("\n", "").replace("\r", "")
+            try:
+                decoded_len = (len(data) * 3) // 4
+            except Exception:
+                decoded_len = 0
+            if decoded_len <= MAX_ATTACHMENT_HISTORY_BYTES:
+                blocks.append({"type": "image", "mediaType": src.get("media_type", "image/png"),
+                               "data": data})
+            else:
+                blocks.append({"type": "text", "text": "🖼️ 图片过大，未在历史中传输"})
+        elif btype == "document":
+            src = item.get("source") or {}
+            blocks.append({
+                "type": "document",
+                "mediaType": src.get("media_type", "application/pdf"),
+                "name": item.get("name") or item.get("file_name", ""),
+                "data": (src.get("data") or "").replace("\n", "").replace("\r", ""),
             })
         else:
             blocks.append({"type": "text", "text": clean_text(json.dumps(item, ensure_ascii=False)[:500])})
@@ -654,7 +732,8 @@ class WSServer:
         self.cfg = cfg
         self.monitor = monitor
         self.hub = hub
-        self.interact = InteractRunner(cfg)
+        self.broker = PermissionBroker(cfg.interact_permission_timeout)
+        self.interact = InteractRunner(cfg, self.broker)
         self.devices: Dict[int, dict] = {}  # id(ws) -> {ip, kind, connected_at}
         self.prompts: List[dict] = []       # 最近手机端 send-prompt 命令（供连接面板展示）
         self._prompt_seq = 0
@@ -734,7 +813,19 @@ class WSServer:
                     await ws.send(json.dumps({"type": "pong"}))
                 elif mtype == "send-prompt":
                     await self._handle_send_prompt(ws, msg)
+                elif mtype == "permission-response":
+                    ok = self.broker.respond(
+                        str(msg.get("requestId", "") or ""),
+                        str(msg.get("behavior", "deny")),
+                        str(msg.get("message", "") or ""))
+                    if not ok:
+                        await ws.send(json.dumps({
+                            "type": "permission-response-error",
+                            "requestId": msg.get("requestId", ""),
+                            "message": "未知或已过期的审批请求",
+                        }, ensure_ascii=False))
         finally:
+            self.interact.broker.cancel_ws(ws)
             self.hub.remove(ws)
             self.devices.pop(id(ws), None)
             log.info("客户端断开: %s（在线 %d）", remote, len(self.hub.clients))
@@ -765,7 +856,7 @@ class WSServer:
         return list(self.prompts)
 
     async def _handle_send_prompt(self, ws, msg: dict) -> None:
-        """手机端远程交互入口：校验开关后异步起 claude -p。"""
+        """手机端远程交互入口：校验开关与附件后异步起 claude -p。"""
         if not self.cfg.allow_interact:
             await ws.send(json.dumps({
                 "type": "interaction", "status": "error",
@@ -773,7 +864,15 @@ class WSServer:
             }, ensure_ascii=False))
             return
         prompt = str(msg.get("prompt", "") or "").strip()
-        if not prompt:
+        max_bytes = max(1, self.cfg.interact_max_upload_mb) * 1024 * 1024
+        attachments, att_err = _validate_attachments(msg.get("attachments"), max_bytes)
+        if att_err:
+            await ws.send(json.dumps({
+                "type": "interaction", "status": "error",
+                "code": "attachment", "message": att_err,
+            }, ensure_ascii=False))
+            return
+        if not prompt and not attachments:
             return
         # 会话 id 仅保留 UUID 安全字符，防止 shell 注入
         session_id = "".join(ch for ch in str(msg.get("sessionId", "") or "")
@@ -792,45 +891,124 @@ class WSServer:
             "sessionId": session_id or "",
             "status": "排队中",
             "time": utc_now_iso(),
+            # 只存附件元信息，绝不存 base64（避免面板/日志泄露大体积数据）
+            "attachments": [{"type": a["type"], "mediaType": a["mediaType"]}
+                            for a in attachments],
         }
         self.prompts.insert(0, rec)
         del self.prompts[200:]  # 最多保留最近 200 条
-        asyncio.create_task(self.interact.run(ws, prompt, session_id or None, rec))
+        asyncio.create_task(self.interact.run(ws, prompt, session_id or None, attachments, rec))
 
 
 # ---------------------------------------------------------------------------
 # 远程交互：调用 claude -p 无头子进程
 # ---------------------------------------------------------------------------
 
+def _user_message_line(prompt: str, attachments: List[dict]) -> str:
+    """构造 stream-json 的用户消息行（含可选 image/document 附件块）。"""
+    content: List[dict] = []
+    for a in attachments or []:
+        atype = a.get("type")
+        src = {"type": "base64", "media_type": a.get("mediaType", ""),
+               "data": a.get("data", "")}
+        if atype == "image":
+            content.append({"type": "image", "source": src})
+        elif atype == "document":
+            content.append({"type": "document", "source": src})
+    if prompt:
+        content.append({"type": "text", "text": prompt})
+    return json.dumps({"type": "user",
+                       "message": {"role": "user", "content": content}},
+                      ensure_ascii=False) + "\n"
+
+
+def _control_response_line(request_id: str, behavior: str, message: str,
+                           session_id: str) -> str:
+    """构造回写给 claude stdin 的 control_response 行（allow / deny）。"""
+    resp = {"subtype": "success", "request_id": request_id,
+            "response": {"behavior": behavior}}
+    if behavior == "deny":
+        resp["response"]["message"] = message or "Denied by user"
+    return json.dumps({"type": "control_response", "response": resp,
+                       "session_id": session_id}, ensure_ascii=False) + "\n"
+
+
+class PermissionBroker:
+    """把 claude 的 can_use_tool 审批请求登记到发起方连接，并回写允许/拒绝结果。
+
+    request_id → {ws, write_q, session_id, timeout_task}；一次审批只回写一次，
+    未知名返回 False。客户端断开时取消其所有挂起请求（自动 deny），避免 claude 挂起。
+    """
+
+    def __init__(self, timeout: int = 300):
+        self.timeout = timeout
+        self._pending: Dict[str, dict] = {}
+
+    def register(self, request_id: str, ws, write_q, session_id: str) -> None:
+        if not request_id or request_id in self._pending:
+            return
+        entry = {"ws": ws, "write_q": write_q, "session_id": session_id}
+        entry["timeout_task"] = asyncio.get_running_loop().create_task(
+            self._timeout(request_id))
+        self._pending[request_id] = entry
+
+    def respond(self, request_id: str, behavior: str, message: str = "") -> bool:
+        entry = self._pending.pop(request_id, None)
+        if entry is None:
+            return False
+        task = entry.get("timeout_task")
+        if task is not None:
+            task.cancel()
+        entry["write_q"].put_nowait(_control_response_line(
+            request_id, behavior, message, entry["session_id"]))
+        return True
+
+    def cancel_ws(self, ws) -> None:
+        for rid in [r for r, e in self._pending.items() if e["ws"] is ws]:
+            self.respond(rid, "deny", "连接已断开")
+
+    async def _timeout(self, request_id: str) -> None:
+        try:
+            await asyncio.sleep(self.timeout)
+        except asyncio.CancelledError:
+            return
+        self.respond(request_id, "deny", "审批超时，已自动拒绝")
+
+
 class InteractRunner:
-    """调用 `claude -p` 无头子进程执行手机端发来的 prompt。
+    """调用 `claude -p` 无头子进程执行手机端发来的 prompt（双向 stream-json）。
 
     响应内容不在此转发 —— 子进程会把会话写入 ~/.claude/projects，
     由 TranscriptMonitor 自动发现并广播给所有查看端（复用现有链路）。
-    这里只负责：起进程、上报 session_id 与完成/失败状态、并发与频率限制。
+    这里负责：起进程、写用户消息（含附件）、解析 stdout 事件、把 can_use_tool
+    审批请求转给手机端并经 broker 回写允许/拒绝、上报状态与完成/失败。
     """
 
     MAX_CONCURRENT = 4      # 全局并发交互上限
     RATE_INTERVAL = 2.0     # 每连接两次交互最小间隔（秒）
 
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, broker: PermissionBroker):
         self.cfg = cfg
+        self.broker = broker
         self._sem = asyncio.Semaphore(self.MAX_CONCURRENT)
         self._last: Dict[int, float] = {}
 
-    def _command(self, session_id: Optional[str]) -> str:
-        """构造固定命令（不含任何用户输入；prompt 走 stdin 传入）。"""
-        parts = ["claude", "-p", "--verbose", "--output-format", "stream-json",
-                 "--permission-mode", self.cfg.interact_permission_mode]
+    def _command(self, session_id: Optional[str]) -> List[str]:
+        """构造固定命令（列表，不含任何用户输入；prompt 走 stdin 传入）。"""
+        parts = [self.cfg.claude_bin, "-p", "--verbose",
+                 "--input-format", "stream-json",
+                 "--output-format", "stream-json",
+                 "--permission-mode", _cli_permission_mode(self.cfg.interact_permission_mode)]
         if self.cfg.interact_permission_mode == "bypassPermissions":
             parts.append("--dangerously-skip-permissions")
         if session_id:
             parts += ["--resume", session_id]
         if self.cfg.interact_model:
             parts += ["--model", self.cfg.interact_model]
-        return " ".join(parts)
+        return parts
 
     async def run(self, ws, prompt: str, session_id: Optional[str],
+                  attachments: Optional[List[dict]] = None,
                   rec: Optional[dict] = None) -> None:
         async def send(obj: dict) -> None:
             try:
@@ -857,8 +1035,8 @@ class InteractRunner:
             await send({"type": "interaction", "status": "started",
                         "sessionId": session_id or ""})
             try:
-                proc = await asyncio.create_subprocess_shell(
-                    self._command(session_id),
+                proc = await asyncio.create_subprocess_exec(
+                    *self._command(session_id),
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
@@ -866,21 +1044,29 @@ class InteractRunner:
             except Exception as exc:
                 set_status("失败", message=f"无法启动 claude：{exc}")
                 await send({"type": "interaction", "status": "error",
-                            "message": f"无法启动 claude：{exc}"})
+                            "code": "launch", "message": f"无法启动 claude：{exc}"})
                 return
 
-            try:
-                proc.stdin.write((prompt + "\n").encode("utf-8"))
-                await proc.stdin.drain()
-            except Exception:
-                pass
-            try:
-                proc.stdin.close()
-            except Exception:
-                pass
-
+            # stdin 单写者：初始消息 / control_response 都经此队列串行写入，避免竞态
+            write_q: asyncio.Queue = asyncio.Queue()
             found_session = session_id or ""
             stderr_tail: List[str] = []
+
+            async def writer() -> None:
+                try:
+                    while True:
+                        item = await write_q.get()
+                        if item is None:
+                            break
+                        proc.stdin.write(item.encode("utf-8"))
+                        await proc.stdin.drain()
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        proc.stdin.close()
+                    except Exception:
+                        pass
 
             async def drain_stderr() -> None:
                 async for raw in proc.stderr:
@@ -890,28 +1076,80 @@ class InteractRunner:
                         if len(stderr_tail) > 8:
                             stderr_tail.pop(0)
 
-            stderr_task = asyncio.create_task(drain_stderr())
-            try:
+            async def pump() -> None:
+                """解析 stdout 全部事件直到 EOF（不提前退出）。"""
+                nonlocal found_session
                 async for raw in proc.stdout:
                     line = raw.decode("utf-8", "replace").strip()
-                    if not line or found_session:
+                    if not line:
                         continue
                     try:
                         obj = json.loads(line)
-                        sid = obj.get("session_id") if isinstance(obj, dict) else None
+                    except Exception:
+                        continue
+                    if not isinstance(obj, dict):
+                        continue
+                    t = obj.get("type")
+                    if t == "system" and obj.get("subtype") == "init":
+                        sid = obj.get("session_id")
                         if sid:
                             found_session = str(sid)
                             set_status("执行中", sessionId=found_session)
                             await send({"type": "interaction", "status": "session",
                                         "sessionId": found_session})
+                    elif t == "control_request":
+                        req = obj.get("request") or {}
+                        if req.get("subtype") == "can_use_tool":
+                            rid = str(req.get("request_id") or req.get("id") or "")
+                            sid = str(obj.get("session_id") or found_session or "")
+                            self.broker.register(rid, ws, write_q, sid)
+                            set_status("等待审批", sessionId=sid)
+                            await send({
+                                "type": "permission-request",
+                                "requestId": rid,
+                                "sessionId": sid,
+                                "toolName": req.get("tool_name") or req.get("name") or "tool",
+                                "displayName": req.get("display_name") or "",
+                                "description": clean_text(str(req.get("description", "")), 1000),
+                                "input": json.dumps(req.get("input") or {}, ensure_ascii=False)[:4000],
+                            })
+                    elif t == "result":
+                        # 单轮结果已出，关闭 stdin 让 print 模式进程退出
+                        write_q.put_nowait(None)
+
+            writer_task = asyncio.create_task(writer())
+            stderr_task = asyncio.create_task(drain_stderr())
+            await write_q.put(_user_message_line(prompt, attachments or []))
+
+            timed_out = False
+            try:
+                try:
+                    await asyncio.wait_for(pump(), timeout=self.cfg.interact_turn_timeout)
+                except asyncio.TimeoutError:
+                    timed_out = True
+                    log.warning("交互超时（%ss），终止 claude", self.cfg.interact_turn_timeout)
+                    try:
+                        proc.kill()
                     except Exception:
                         pass
+                except Exception:
+                    log.exception("读取 claude 输出出错")
             finally:
+                write_q.put_nowait(None)
+                try:
+                    await asyncio.wait_for(writer_task, 5)
+                except Exception:
+                    writer_task.cancel()
                 await stderr_task
 
             code = await proc.wait()
 
-            if code == 0:
+            if timed_out:
+                set_status("失败", sessionId=found_session, message="交互超时")
+                await send({"type": "interaction", "status": "error",
+                            "code": "timeout", "sessionId": found_session,
+                            "message": "交互超时"})
+            elif code == 0:
                 set_status("完成", sessionId=found_session, exitCode=0)
                 await send({"type": "interaction", "status": "finished",
                             "sessionId": found_session, "exitCode": 0})
@@ -1474,7 +1712,7 @@ async def main() -> None:
     # 而误判为“keepalive ping timeout (1011)”强制断连（手机端“加载会话超时后断连”的根因）。
     # 存活探测交给客户端（安卓 OkHttp pingInterval=20s 自带 ping，服务端仍自动回 pong）。
     async with ws_serve(ws_server.handle, host, cfg.port, process_request=process_request,
-                        ping_interval=None, ping_timeout=None, max_size=2**24):
+                        ping_interval=None, ping_timeout=None, max_size=64 * 2**20):
         await tunnels.start()
         # 后台任务：等隧道地址稳定后生成二维码 PNG 并发送邮件通知
         asyncio.create_task(_publish_config(cfg, tunnels, cfg.port))

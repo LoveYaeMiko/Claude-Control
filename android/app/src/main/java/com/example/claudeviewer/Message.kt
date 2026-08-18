@@ -6,13 +6,22 @@ import org.json.JSONObject
  * 与电脑端 relay_server.py 协议一致的消息模型（org.json 解析，无额外依赖）。
  */
 data class ContentBlock(
-    val type: String,          // text | thinking | tool_use | tool_result
+    val type: String,          // text | thinking | tool_use | tool_result | image | document
     val text: String = "",
     val thinking: String = "",
     val name: String = "",
     val input: String = "",
     val result: String = "",
     val isError: Boolean = false,
+    val mediaType: String = "",   // image/document 块的 MIME 类型
+    val data: String = "",        // image/document 块的 base64 数据
+)
+
+/** 手机端待发送的附件（图片/PDF），data 为无换行 base64。 */
+data class Attachment(
+    val type: String,          // "image" | "document"
+    val mediaType: String,
+    val data: String,
 )
 
 data class SessionInfo(
@@ -66,6 +75,8 @@ object Protocol {
                     "thinking" -> ContentBlock("thinking", thinking = b.optString("thinking"))
                     "tool_use" -> ContentBlock("tool_use", name = b.optString("name"), input = b.opt("input").toString(), result = b.optString("result"), isError = b.optBoolean("isError"))
                     "tool_result" -> ContentBlock("tool_result", result = b.optString("result"), isError = b.optBoolean("isError"))
+                    "image" -> ContentBlock("image", mediaType = b.optString("mediaType"), data = b.optString("data"))
+                    "document" -> ContentBlock("document", mediaType = b.optString("mediaType"), name = b.optString("name"), data = b.optString("data"))
                     else -> null
                 }
             }

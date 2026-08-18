@@ -5,6 +5,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
@@ -30,6 +31,8 @@ class WebSocketClient(
         fun onSessionEnd(sessionId: String)
         fun onMessages(sessionId: String, isHistory: Boolean, isUpdate: Boolean, messages: List<ViewMessage>, hasMore: Boolean = false)
         fun onInteraction(status: String, sessionId: String, message: String)
+        fun onPermissionRequest(requestId: String, sessionId: String, toolName: String, displayName: String, description: String, input: String)
+        fun onPermissionResponseError(requestId: String, message: String)
         fun onClosing(code: Int, reason: String)
         fun onFailure(t: Throwable)
     }
@@ -66,6 +69,18 @@ class WebSocketClient(
                     "interaction" -> listenerRef?.onInteraction(
                         obj.optString("status"),
                         obj.optString("sessionId"),
+                        obj.optString("message"),
+                    )
+                    "permission-request" -> listenerRef?.onPermissionRequest(
+                        obj.optString("requestId"),
+                        obj.optString("sessionId"),
+                        obj.optString("toolName"),
+                        obj.optString("displayName"),
+                        obj.optString("description"),
+                        obj.optString("input"),
+                    )
+                    "permission-response-error" -> listenerRef?.onPermissionResponseError(
+                        obj.optString("requestId"),
                         obj.optString("message"),
                     )
                 }
@@ -106,11 +121,27 @@ class WebSocketClient(
             beforeIdx?.let { put("beforeIdx", it) }
         }.toString())
 
-    fun sendPrompt(prompt: String, sessionId: String?) =
+    fun sendPrompt(prompt: String, sessionId: String?, attachments: List<Attachment> = emptyList()) =
         ws?.send(JSONObject()
             .put("type", "send-prompt")
             .put("prompt", prompt)
             .put("sessionId", sessionId ?: "")
+            .put("attachments", JSONArray().apply {
+                attachments.forEach { a ->
+                    put(JSONObject()
+                        .put("type", a.type)
+                        .put("mediaType", a.mediaType)
+                        .put("data", a.data))
+                }
+            })
+            .toString())
+
+    fun sendPermissionResponse(requestId: String, allow: Boolean, message: String = "") =
+        ws?.send(JSONObject()
+            .put("type", "permission-response")
+            .put("requestId", requestId)
+            .put("behavior", if (allow) "allow" else "deny")
+            .put("message", message)
             .toString())
 
     fun close() {

@@ -305,12 +305,239 @@ async def main() -> int:
                 proc.kill()
             reader_task.cancel()
 
+    # 交互链路（权限审批 + 多模态 + 权限模式映射）的独立服务实例 + 断言
+    await test_interact()
+
     print()
     if FAILED:
         print(f"❌ {len(FAILED)} 项失败: {FAILED}")
         return 1
     print("✅ 全部通过")
     return 0
+
+
+async def _recv_until(ws, pred, timeout=8.0):
+    """从 ws 收帧直到 pred(msg) 命中或超时；命中返回该帧，否则 None。"""
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+        except Exception:
+            return None
+        if pred(msg):
+            return msg
+    return None
+
+
+async def test_interact() -> None:
+    """远程交互端到端测试：权限审批（allow/deny/未知/超时）、附件校验、权限模式映射。
+
+    起一个 CC_ALLOW_INTERACT=1 + CC_INTERACT_PERMISSION_MODE=default 的临时服务，
+    用 CC_CLAUDE_BIN 指向 fake_claude.py 的 .bat 替身（Windows 上 create_subprocess_exec
+    经 cmd.exe 执行 .bat，与生产环境 `claude.cmd` 同路径）。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        session_id = mock_transcript.make_mock_project(root)
+        port = free_port()
+        token = "interact-token-456"
+
+        # ---- 单元级（无需起服务）：权限模式映射 / 消息行 / 内容块 / 附件校验 ----
+        check("_cli_permission_mode 映射 default→manual",
+              relay_server._cli_permission_mode("default") == "manual")
+        check("_cli_permission_mode 透传 bypassPermissions",
+              relay_server._cli_permission_mode("bypassPermissions") == "bypassPermissions")
+
+        line = relay_server._user_message_line(
+            "看图", [{"type": "image", "mediaType": "image/png", "data": "QUJD"}])
+        uobj = json.loads(line)
+        blocks = uobj["message"]["content"]
+        check("_user_message_line 含 image 块（base64 source）",
+              any(b.get("type") == "image" and b.get("source", {}).get("data") == "QUJD"
+                  for b in blocks))
+        check("_user_message_line 末尾 text 块", blocks[-1].get("type") == "text"
+              and blocks[-1]["text"] == "看图")
+
+        resp = relay_server._control_response_line("req_1", "deny", "no", "s1")
+        robj = json.loads(resp)
+        check("_control_response_line deny 带 message",
+              robj["response"]["response"]["behavior"] == "deny"
+              and robj["response"]["response"]["message"] == "no")
+
+        cb = relay_server._content_to_blocks(
+            [{"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                          "data": "QUJD"}}])
+        check("_content_to_blocks 图片分支",
+              bool(cb) and cb[0].get("type") == "image"
+              and cb[0].get("mediaType") == "image/png" and cb[0].get("data") == "QUJD")
+        cb2 = relay_server._content_to_blocks(
+            [{"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                             "data": "QUJD"}, "name": "a.pdf"}])
+        check("_content_to_blocks document 分支",
+              bool(cb2) and cb2[0].get("type") == "document" and cb2[0].get("name") == "a.pdf")
+
+        good, err = relay_server._validate_attachments(
+            [{"type": "image", "mediaType": "image/png", "data": "QUJD"}], 20 * 1024 * 1024)
+        check("_validate_attachments 合法图片", err == "" and len(good) == 1)
+        _, err2 = relay_server._validate_attachments(
+            [{"type": "video", "mediaType": "video/mp4", "data": "QUJD"}], 20 * 1024 * 1024)
+        check("_validate_attachments 拒绝非法类型", err2 != "")
+        _, err3 = relay_server._validate_attachments(
+            [{"type": "image", "mediaType": "image/png", "data": "not base64!!"}],
+            20 * 1024 * 1024)
+        check("_validate_attachments 拒绝非法 base64", err3 != "")
+        _, err4 = relay_server._validate_attachments(
+            [{"type": "image", "mediaType": "image/png", "data": "A" * 100}], 4)
+        check("_validate_attachments 拒绝超大", err4 != "")
+        _, err5 = relay_server._validate_attachments(
+            [{"type": "image", "mediaType": "image/png", "data": "QUJD"} for _ in range(6)],
+            20 * 1024 * 1024)
+        check("_validate_attachments 拒绝超过 5 个", err5 != "")
+
+        # PermissionBroker 超时自动 deny + 客户端断开 cancel_ws
+        broker = relay_server.PermissionBroker(timeout=1)
+        q = asyncio.Queue()
+
+        class _FakeWS:
+            pass
+        fws = _FakeWS()
+        broker.register("rid_timeout", fws, q, "s1")
+        await asyncio.sleep(1.5)
+        to = q.get_nowait()
+        check("PermissionBroker 超时自动 deny",
+              json.loads(to)["response"]["response"]["behavior"] == "deny")
+        broker2 = relay_server.PermissionBroker(timeout=300)
+        q2 = asyncio.Queue()
+        broker2.register("rid_cancel", fws, q2, "s1")
+        broker2.cancel_ws(fws)
+        check("PermissionBroker cancel_ws deny 挂起请求",
+              json.loads(q2.get_nowait())["response"]["response"]["behavior"] == "deny")
+
+        # ---- 起第二个服务实例（开启远程交互 + 标准审批模式 + fake claude） ----
+        fake_py = Path(__file__).resolve().parent / "fake_claude.py"
+        marker = root / "marker.txt"
+        bat = root / "fake_claude.bat"
+        bat.write_text(
+            f'@echo off\r\n"{sys.executable}" "{fake_py}" %*\r\n', encoding="utf-8")
+
+        env = dict(os.environ)
+        env["CC_TRANSCRIPTS_DIR"] = str(root)
+        env["CC_TOKEN"] = token
+        env["CC_TUNNEL"] = "none"
+        env["CC_PORT"] = str(port)
+        env["PYTHONUTF8"] = "1"
+        env["CC_AUTO_OPEN"] = "0"
+        env["CC_ALLOW_INTERACT"] = "1"
+        env["CC_INTERACT_PERMISSION_MODE"] = "default"
+        env["CC_CLAUDE_BIN"] = str(bat)
+        env["CC_FAKE_MARKER"] = str(marker)
+        env["CC_INTERACT_PERMISSION_TIMEOUT"] = "10"
+        env["CC_INTERACT_TURN_TIMEOUT"] = "30"
+        env["CC_INTERACT_MAX_UPLOAD_MB"] = "1"   # 缩小上限，便于测「超大附件」路径
+        env["CC_QR_PNG_PATH"] = str(root / "qr_interact.png")
+
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "relay_server.py",
+            cwd=str(Path(__file__).resolve().parents[1]),
+            env=env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        log_lines = []
+
+        async def reader():
+            async for raw in proc.stdout:
+                log_lines.append(raw.decode("utf-8", "replace").rstrip())
+
+        reader_task = asyncio.create_task(reader())
+        base = f"http://127.0.0.1:{port}"
+        try:
+            for _ in range(40):
+                try:
+                    urllib.request.urlopen(base + "/healthz", timeout=1)
+                    break
+                except Exception:
+                    await asyncio.sleep(0.25)
+
+            import websockets  # noqa: F401
+            from websockets.asyncio.client import connect as ws_connect
+
+            # ---- 场景 A：无附件 send-prompt → started/session/permission-request → allow ----
+            async with ws_connect(f"ws://127.0.0.1:{port}/ws?token={token}") as ws:
+                await ws.recv()  # hello
+                await ws.send(json.dumps({"type": "send-prompt", "prompt": "帮我列出当前目录"}))
+                started = await _recv_until(ws, lambda m: m.get("type") == "interaction"
+                                            and m.get("status") == "started")
+                check("interact 发送后回 started", started is not None)
+                sess = await _recv_until(ws, lambda m: m.get("type") == "interaction"
+                                         and m.get("status") == "session")
+                check("interact 回 session 帧（含 sessionId）",
+                      bool(sess and sess.get("sessionId")))
+                perm = await _recv_until(ws, lambda m: m.get("type") == "permission-request")
+                check("interact 回 permission-request", perm is not None)
+                check("permission-request 字段齐全",
+                      bool(perm and perm.get("requestId") and perm.get("toolName") == "Bash"))
+                await ws.send(json.dumps({"type": "permission-response",
+                                          "requestId": perm["requestId"], "behavior": "allow"}))
+                fin = await _recv_until(ws, lambda m: m.get("type") == "interaction"
+                                        and m.get("status") == "finished", timeout=10)
+                check("permission-response allow 后 finished exitCode=0",
+                      bool(fin and fin.get("exitCode") == 0))
+            check("fake_claude 收到 allow 标记",
+                  "allow" in (marker.read_text(encoding="utf-8") if marker.exists() else ""))
+
+            # ---- 场景 B：deny ----
+            marker.write_text("", encoding="utf-8")
+            async with ws_connect(f"ws://127.0.0.1:{port}/ws?token={token}") as ws:
+                await ws.recv()
+                await ws.send(json.dumps({"type": "send-prompt", "prompt": "执行危险命令"}))
+                perm = await _recv_until(ws, lambda m: m.get("type") == "permission-request")
+                check("deny 场景收到 permission-request", perm is not None)
+                await ws.send(json.dumps({"type": "permission-response",
+                                          "requestId": perm["requestId"], "behavior": "deny",
+                                          "message": "不允许"}))
+                fin = await _recv_until(ws, lambda m: m.get("type") == "interaction"
+                                        and m.get("status") == "finished", timeout=10)
+                check("permission-response deny 后 finished（优雅拒绝）",
+                      bool(fin and fin.get("exitCode") == 0))
+            check("fake_claude 收到 deny 标记",
+                  "deny" in (marker.read_text(encoding="utf-8") if marker.exists() else ""))
+
+            # ---- 场景 C：未知 requestId → permission-response-error ----
+            async with ws_connect(f"ws://127.0.0.1:{port}/ws?token={token}") as ws:
+                await ws.recv()
+                await ws.send(json.dumps({"type": "permission-response",
+                                          "requestId": "no-such-id", "behavior": "allow"}))
+                err = await _recv_until(ws, lambda m: m.get("type") == "permission-response-error")
+                check("未知 requestId 回 permission-response-error", err is not None)
+
+            # ---- 场景 D：非法附件 → interaction error(code=attachment) ----
+            async with ws_connect(f"ws://127.0.0.1:{port}/ws?token={token}") as ws:
+                await ws.recv()
+                await ws.send(json.dumps({"type": "send-prompt", "prompt": "hi",
+                                          "attachments": [{"type": "video", "mediaType": "video/mp4",
+                                                           "data": "QUJD"}]}))
+                err = await _recv_until(ws, lambda m: m.get("type") == "interaction"
+                                        and m.get("status") == "error"
+                                        and m.get("code") == "attachment")
+                check("非法附件类型回 interaction error(code=attachment)", err is not None)
+
+            # ---- 场景 E：超大附件（> CC_INTERACT_MAX_UPLOAD_MB=1MiB）→ 拒绝 ----
+            async with ws_connect(f"ws://127.0.0.1:{port}/ws?token={token}") as ws:
+                await ws.recv()
+                big = "A" * (2 * 1024 * 1024)   # 解码后约 1.5 MiB > 1 MiB 上限
+                await ws.send(json.dumps({"type": "send-prompt", "prompt": "hi",
+                                          "attachments": [{"type": "image", "mediaType": "image/png",
+                                                           "data": big}]}))
+                err = await _recv_until(ws, lambda m: m.get("type") == "interaction"
+                                        and m.get("status") == "error"
+                                        and m.get("code") == "attachment")
+                check("超大附件回 interaction error(code=attachment)", err is not None)
+        finally:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except Exception:
+                proc.kill()
+            reader_task.cancel()
 
 
 def free_port() -> int:
