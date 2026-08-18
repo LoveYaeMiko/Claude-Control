@@ -50,7 +50,7 @@ from urllib.parse import quote, unquote
 # ---------------------------------------------------------------------------
 
 APP_NAME = "Claude-Control"
-VERSION = "0.2.2"
+VERSION = "0.3.1"
 DEFAULT_PORT = 9876
 SCAN_INTERVAL = 1.0          # transcript 轮询间隔（秒）
 IDLE_TIMEOUT = 120           # 会话超过 N 秒无写入视为“结束”（供状态展示）
