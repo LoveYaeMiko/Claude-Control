@@ -714,10 +714,20 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
             toast(getString(R.string.scan_unrecognized))
             return
         }
+        val token = uri.getQueryParameter("token") ?: ""
         urlInput.setText(url)
-        tokenInput.setText(uri.getQueryParameter("token") ?: "")
+        tokenInput.setText(token)
+        getSharedPreferences("claudeviewer", MODE_PRIVATE).edit()
+            .putString("ws_url", url)
+            .putString("ws_token", token)
+            .putBoolean("connected", true)
+            .apply()
         toast(getString(R.string.scan_configured))
-        if (ws == null) toggleConnection()
+        // 扫码总是强制用新地址重连：当前若正连着一个过期隧道地址（旧域名 DNS 已失效，
+        // 处于重连循环），也要先断开旧连接再切到新地址，否则会一直对旧域名报
+        // “unable to resolve host”。旧逻辑 `if (ws == null)` 在重连循环中 ws 非空，导致不切新地址。
+        RelayService.disconnect()
+        doConnect(url, token)
     }
 
     private fun sendPrompt() {
