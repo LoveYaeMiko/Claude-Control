@@ -400,7 +400,9 @@ class MainActivity : AppCompatActivity(), WebSocketClient.Listener {
 
     /** 从后台返回 / 主题切换重建后，若之前处于已连接状态但连接已丢则自动重连。 */
     private fun autoConnectIfNeeded() {
-        if (RelayService.client != null) return
+        // 服务已配置（shouldReconnect=true 表示正在连接或已连接，含前台服务尚未完成启动的窗口期）
+        // 时不重复发起连接，避免与 doConnect 竞态产生重复 WebSocket 连接。
+        if (RelayService.client != null || RelayService.shouldReconnect) return
         if (!getSharedPreferences("claudeviewer", MODE_PRIVATE).getBoolean("connected", false)) return
         val url = urlInput.text.toString().trim().trimEnd('/')
         if (url.isEmpty()) return

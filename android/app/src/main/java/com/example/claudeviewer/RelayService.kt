@@ -86,6 +86,7 @@ class RelayService : Service(), WebSocketClient.Listener {
 
     private fun open() {
         cancelReconnect()
+        client?.close()   // 关闭上一个连接，避免重复 open()（重连/重复启动）留下孤儿连接
         val c = WebSocketClient(url, token)
         client = c
         c.connect(this)   // 本服务作为永久 Listener
